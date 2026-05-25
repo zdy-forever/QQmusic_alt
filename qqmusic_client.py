@@ -34,6 +34,8 @@ DEFAULT_API_BASE = "https://api.ygking.top"
 DEFAULT_TIMEOUT = 15
 DEFAULT_AUTH_FILE = Path(__file__).with_name(".qqmusic_auth.json")
 DEFAULT_SETTINGS_FILE = Path(__file__).with_name(".qqmusic_settings.json")
+PLAYLIST_INITIAL_PAGE_SIZE = 50
+PLAYLIST_BACKGROUND_PAGE_SIZE = 500
 QQ_QR_APPID = "716027609"
 QQ_QR_THIRD_APPID = "100497308"
 WX_QR_APPID = "wx48db31d50e334801"
@@ -244,6 +246,15 @@ def get_gtk(p_skey: str) -> int:
 def gtk_from_cookie(cookie: str) -> int:
     p_skey = cookie_value(cookie, "p_skey") or cookie_value(cookie, "skey")
     return get_gtk(p_skey) if p_skey else 5381
+
+
+def musicu_login_fields(cookie: str) -> dict[str, str]:
+    tme_login_type = cookie_value(cookie, "tmeLoginType")
+    if tme_login_type:
+        return {"tmeAppID": "qqmusic", "tmeLoginType": tme_login_type}
+    if cookie_value(cookie, "login_type") == "2" or cookie_value(cookie, "wxuin"):
+        return {"tmeAppID": "qqmusic", "tmeLoginType": "1"}
+    return {}
 
 
 class QQMusicAPI:
@@ -601,7 +612,7 @@ class QQMusicAPI:
         req_data = req.get("data") if isinstance(req.get("data"), dict) else {}
 
         cookie_pairs_list = merge_cookie_pairs([], cookie_pairs(set_cookies))
-        cookie_pairs_list = merge_cookie_pairs(cookie_pairs_list, ["login_type=2"])
+        cookie_pairs_list = merge_cookie_pairs(cookie_pairs_list, ["login_type=2", "tmeLoginType=1"])
         wxuin = str(req_data.get("wxuin") or req_data.get("uin") or req_data.get("musicid") or "")
         musicid = str(req_data.get("musicid") or req_data.get("uin") or "")
         musickey = str(
@@ -796,7 +807,13 @@ class QQMusicAPI:
             return f"{lyric}\n\n--- 翻译 ---\n{trans}".strip()
         return lyric.strip()
 
-    def playlist_songs(self, playlist_id: str, cookie: str = "") -> tuple[str, list[Song]]:
+    def playlist_songs_page(
+        self,
+        playlist_id: str,
+        cookie: str = "",
+        begin: int = 0,
+        count: int = PLAYLIST_BACKGROUND_PAGE_SIZE,
+    ) -> tuple[str, list[Song], int]:
         payload = self._get_url_json(
             "https://c.y.qq.com/qzone/fcg-bin/fcg_ucc_getcdinfo_byids_cp.fcg",
             {
@@ -815,6 +832,8 @@ class QQMusicAPI:
                 "notice": 0,
                 "platform": "yqq.json",
                 "needNewCode": 0,
+                "song_begin": max(0, begin),
+                "song_num": max(1, count),
             },
             {
                 "Cookie": cookie,
@@ -838,7 +857,30 @@ class QQMusicAPI:
         items = data.get("songlist") or data.get("songs") or []
         if not isinstance(items, list):
             items = []
-        return name, [normalize_song(item) for item in items if isinstance(item, dict)]
+        total_value = data.get("total_song_num") or data.get("songnum") or data.get("total") or data.get("song_count")
+        try:
+            total = int(total_value) if total_value is not None else begin + len(items)
+        except (TypeError, ValueError):
+            total = begin + len(items)
+        songs = [normalize_song(item) for item in items if isinstance(item, dict)]
+        return name, songs, max(total, begin + len(songs))
+
+    def playlist_songs(self, playlist_id: str, cookie: str = "") -> tuple[str, list[Song]]:
+        name, results, total = self.playlist_songs_page(playlist_id, cookie, 0, PLAYLIST_BACKGROUND_PAGE_SIZE)
+        loaded = len(results)
+        while loaded < total:
+            page_name, page_results, page_total = self.playlist_songs_page(playlist_id, cookie, loaded, PLAYLIST_BACKGROUND_PAGE_SIZE)
+            if page_name:
+                name = page_name
+            if page_total > total:
+                total = page_total
+            if not page_results:
+                break
+            results.extend(page_results)
+            loaded += len(page_results)
+            if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE and loaded >= page_total:
+                break
+        return name, results
 
     def user_playlists(self, qq_number: str, cookie: str = "") -> list[Playlist]:
         payload = self._get_url_json(
@@ -874,7 +916,15 @@ class QQMusicAPI:
         playlists = [normalize_playlist(item) for item in items if isinstance(item, dict)]
         return [playlist for playlist in playlists if playlist.id]
 
-    def add_song_to_playlist(self, song_id: str, song_type: int, playlist_dirid: str, cookie: str, song_mid: str = "") -> None:
+    def add_song_to_playlist(
+        self,
+        song_id: str,
+        song_type: int,
+        playlist_dirid: str,
+        cookie: str,
+        song_mid: str = "",
+        playlist_id: str = "",
+    ) -> None:
         if not cookie:
             raise QQMusicError("请先登录")
         if not song_id:
@@ -898,7 +948,9 @@ class QQMusicAPI:
             },
             cookie,
             "https://y.qq.com/n/ryqq/playlist",
+            include_comm=False,
         )
+        tried_legacy = False
         try:
             self._raise_if_musicu_failed(payload, "req_0", "添加歌曲")
         except QQMusicError as exc:
@@ -906,8 +958,15 @@ class QQMusicAPI:
                 raise
             try:
                 self.add_song_to_playlist_legacy(song_mid, song_type, playlist_dirid, cookie)
+                tried_legacy = True
             except QQMusicError:
                 raise exc
+        if playlist_id and not self._playlist_contains_song_after_add(playlist_id, song_id, song_mid, cookie):
+            if song_mid and not tried_legacy:
+                self.add_song_to_playlist_legacy(song_mid, song_type, playlist_dirid, cookie)
+                if self._playlist_contains_song_after_add(playlist_id, song_id, song_mid, cookie):
+                    return
+            raise QQMusicError("QQ 音乐接口返回成功，但刷新目标歌单后没有发现这首歌。请重新登录后再试。")
 
     def add_song_to_playlist_legacy(self, song_mid: str, song_type: int, playlist_dirid: str, cookie: str) -> None:
         uin = qq_number_from_cookie(cookie)
@@ -937,6 +996,18 @@ class QQMusicAPI:
         )
         self._raise_if_write_failed(payload, "添加歌曲")
 
+    def _playlist_contains_song_after_add(self, playlist_id: str, song_id: str, song_mid: str, cookie: str) -> bool:
+        for attempt in range(3):
+            if attempt:
+                time.sleep(1)
+            _name, songs = self.playlist_songs(playlist_id, cookie)
+            for song in songs:
+                if song_id and song.song_id == song_id:
+                    return True
+                if song_mid and song.mid == song_mid:
+                    return True
+        return False
+
     def remove_song_from_playlist(self, song_id: str, song_type: int, playlist_dirid: str, cookie: str) -> None:
         if not cookie:
             raise QQMusicError("请先登录")
@@ -961,6 +1032,7 @@ class QQMusicAPI:
             },
             cookie,
             "https://y.qq.com/n/yqq/playlist",
+            include_comm=False,
         )
         self._raise_if_musicu_failed(payload, "req_0", "移除歌曲")
 
@@ -1040,6 +1112,7 @@ class QQMusicAPI:
             },
             cookie,
             f"https://y.qq.com/n/ryqq/playlist_edit/{playlist_dirid}",
+            include_comm=False,
         )
         self._raise_if_musicu_failed(payload, "req_0", "重命名歌单")
 
@@ -1061,7 +1134,13 @@ class QQMusicAPI:
             raise QQMusicError("接口返回格式异常")
         return payload
 
-    def _post_musicu_json(self, requests: dict[str, Any], cookie: str, referer: str = "https://y.qq.com/") -> dict[str, Any]:
+    def _post_musicu_json(
+        self,
+        requests: dict[str, Any],
+        cookie: str,
+        referer: str = "https://y.qq.com/",
+        include_comm: bool = True,
+    ) -> dict[str, Any]:
         uin = qq_number_from_cookie(cookie)
         comm = {
             "g_tk": gtk_from_cookie(cookie),
@@ -1073,13 +1152,8 @@ class QQMusicAPI:
             "platform": "yqq.json",
             "needNewCode": 1,
         }
-        tme_login_type = cookie_value(cookie, "tmeLoginType")
-        if tme_login_type:
-            comm.update({"tmeAppID": "qqmusic", "tmeLoginType": tme_login_type})
-        payload = {
-            "comm": comm,
-            **requests,
-        }
+        comm.update(musicu_login_fields(cookie))
+        payload = {"comm": comm, **requests} if include_comm else dict(requests)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         _status, response_body, _set_cookies, _location = self._request(
             "https://u.y.qq.com/cgi-bin/musicu.fcg",
@@ -1098,7 +1172,7 @@ class QQMusicAPI:
 
     def _raise_if_write_failed(self, payload: dict[str, Any], action: str) -> None:
         failure_code: Any = None
-        for key in ("code", "subcode", "retcode", "errcode"):
+        for key in ("code", "subcode", "retcode", "retCode", "errcode"):
             value = payload.get(key)
             if value is None:
                 continue
@@ -1125,6 +1199,7 @@ class QQMusicAPI:
         data = request_payload.get("data")
         if not isinstance(data, dict):
             return
+        self._raise_if_write_failed(data, action)
         retcode = data.get("retCode")
         if retcode in (None, 0):
             return
@@ -1330,7 +1405,11 @@ def load_auth() -> dict[str, str]:
         raise QQMusicError(f"读取登录信息失败: {exc}") from exc
     if not isinstance(data, dict):
         return {}
-    return {str(key): str(value) for key, value in data.items() if value is not None}
+    auth = {str(key): str(value) for key, value in data.items() if value is not None}
+    cookie_account = qq_number_from_cookie(auth.get("cookie", ""))
+    if cookie_account:
+        auth["qq_number"] = cookie_account
+    return auth
 
 
 def save_auth(qq_number: str, cookie: str) -> None:
@@ -1358,6 +1437,11 @@ def clear_auth() -> None:
 
 
 def qq_number_from_cookie(cookie: str) -> str:
+    wxuin = cookie_value(cookie, "wxuin")
+    if wxuin:
+        digits = re.sub(r"\D", "", wxuin)
+        if digits:
+            return digits
     for key in ("uin", "wxuin"):
         match = re.search(rf"(?:^|;\s*){key}=([^;]+)", cookie)
         if match:
@@ -1634,6 +1718,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     current_lyric_index = -1
     current_song_index = -1
     playback_token = 0
+    playlist_load_token = 0
     user_stopped = True
     playback_started_at = 0.0
     progress_dragging = False
@@ -1909,11 +1994,14 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             parts.append(f"MID: {song.mid}")
         return "  ".join(parts)
 
+    def insert_song_items(results: list[Song]) -> None:
+        if results:
+            listbox.insert(tk.END, *(song_queue_display(song) for song in results))
+
     def refresh_song_list() -> None:
         selection = selected_song_index()
         listbox.delete(0, tk.END)
-        for song in songs:
-            listbox.insert(tk.END, song_queue_display(song))
+        insert_song_items(songs)
         if 0 <= selection < len(songs):
             listbox.selection_set(selection)
             listbox.see(selection)
@@ -2055,7 +2143,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         songs.clear()
         listbox.delete(0, tk.END)
         songs.extend(results)
-        refresh_song_list()
+        insert_song_items(results)
         set_busy(False, message)
         queue_var.set(f"0 / {len(songs)}")
         if songs:
@@ -2065,6 +2153,16 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             info_var.set("没有歌曲")
             lyric_text.delete("1.0", tk.END)
             player_meta_var.set("队列为空")
+
+    def append_songs(results: list[Song], message: str) -> None:
+        was_empty = not songs
+        songs.extend(results)
+        insert_song_items(results)
+        set_busy(False, message)
+        queue_var.set(f"{current_song_index + 1 if current_song_index >= 0 else 0} / {len(songs)}")
+        if was_empty and songs:
+            listbox.selection_set(0)
+            show_song(songs[0])
 
     def search() -> None:
         nonlocal current_playlist
@@ -2143,10 +2241,10 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         account_title.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         account_buttons = ttk.Frame(container, style="Panel.TFrame")
         account_buttons.grid(row=12, column=0, columnspan=2, sticky="ew")
-        login_button_text = "重新登录" if auth.get("qq_number") else "登录"
-        ttk.Button(account_buttons, text=login_button_text, command=lambda: (window.destroy(), choose_login_method()), style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
+        account_button_text = "退出登录" if auth.get("qq_number") else "登录"
+        account_button_command = logout if auth.get("qq_number") else choose_login_method
+        ttk.Button(account_buttons, text=account_button_text, command=lambda: (window.destroy(), account_button_command()), style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
         ttk.Button(account_buttons, text="同步歌单", command=lambda: (window.destroy(), sync_playlists()), style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(account_buttons, text="退出登录", command=lambda: (window.destroy(), logout()), style="Accent.TButton").grid(row=0, column=2)
 
         buttons = ttk.Frame(container, style="Panel.TFrame")
         buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(18, 0))
@@ -2344,10 +2442,12 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         threading.Thread(target=worker, daemon=True).start()
 
     def load_playlist() -> None:
-        nonlocal current_playlist
+        nonlocal current_playlist, playlist_load_token
         playlist = selected_playlist()
         if not playlist:
             return
+        playlist_load_token += 1
+        load_token = playlist_load_token
         current_playlist = playlist
         if playlist.id == "__downloads__":
             replace_songs(downloaded_songs(str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"]))), "已下载的歌曲")
@@ -2356,12 +2456,62 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
         def worker() -> None:
             try:
-                playlist_name, results = api.playlist_songs(playlist.id, auth.get("cookie", ""))
+                playlist_name, results, total = api.playlist_songs_page(playlist.id, auth.get("cookie", ""), 0, PLAYLIST_INITIAL_PAGE_SIZE)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 root.after(0, lambda: (set_busy(False, "歌单加载失败"), messagebox.showerror("歌单加载失败", message)))
                 return
-            root.after(0, lambda: replace_songs(results, f"{playlist_name}: {len(results)} 首"))
+            loaded = len(results)
+
+            def show_first_page(page_results: list[Song] = results, name: str = playlist_name, loaded_count: int = loaded, total_count: int = total) -> None:
+                if load_token != playlist_load_token:
+                    return
+                if loaded_count < total_count:
+                    replace_songs(page_results, f"{name}: 已加载 {loaded_count} / {total_count} 首")
+                else:
+                    replace_songs(page_results, f"{name}: {loaded_count} 首")
+
+            root.after(0, show_first_page)
+            while loaded < total:
+                try:
+                    page_name, page_results, page_total = api.playlist_songs_page(
+                        playlist.id,
+                        auth.get("cookie", ""),
+                        loaded,
+                        PLAYLIST_BACKGROUND_PAGE_SIZE,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+
+                    def show_partial_error(error_message: str = message, loaded_count: int = loaded, total_count: int = total) -> None:
+                        if load_token == playlist_load_token:
+                            set_busy(False, f"已加载 {loaded_count} / {total_count} 首，后续加载失败: {error_message}")
+
+                    root.after(0, show_partial_error)
+                    return
+                if page_name:
+                    playlist_name = page_name
+                total = max(total, page_total)
+                if not page_results:
+                    break
+                loaded += len(page_results)
+
+                def show_next_page(
+                    page_results: list[Song] = page_results,
+                    name: str = playlist_name,
+                    loaded_count: int = loaded,
+                    total_count: int = total,
+                ) -> None:
+                    if load_token != playlist_load_token:
+                        return
+                    if loaded_count < total_count:
+                        append_songs(page_results, f"{name}: 已加载 {loaded_count} / {total_count} 首")
+                    else:
+                        append_songs(page_results, f"{name}: {loaded_count} 首")
+
+                root.after(0, show_next_page)
+                if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE and loaded >= total:
+                    break
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2561,7 +2711,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
         def worker() -> None:
             try:
-                api.add_song_to_playlist(song.song_id, song.song_type, playlist.dirid or playlist.id, cookie, song.mid)
+                api.add_song_to_playlist(song.song_id, song.song_type, playlist.dirid or playlist.id, cookie, song.mid, playlist.id)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 root.after(0, lambda: (set_busy(False, "添加失败"), messagebox.showerror("添加失败", message)))
@@ -2612,16 +2762,36 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             return
         if not messagebox.askyesno("移除歌曲", f"从“{current_playlist.name}”移除“{song.title}”？"):
             return
+        target_playlist = current_playlist
         set_busy(True, "正在移除歌曲...")
 
         def worker() -> None:
             try:
-                api.remove_song_from_playlist(song.song_id, song.song_type, current_playlist.dirid or current_playlist.id, cookie)
+                api.remove_song_from_playlist(song.song_id, song.song_type, target_playlist.dirid or target_playlist.id, cookie)
+                synced_playlists = api.user_playlists(auth.get("qq_number", ""), cookie)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 root.after(0, lambda: (set_busy(False, "移除失败"), messagebox.showerror("移除失败", message)))
                 return
-            root.after(0, lambda: (set_busy(False, "歌曲已移除"), load_playlist()))
+
+            def update() -> None:
+                nonlocal current_playlist
+                remote_playlists.clear()
+                remote_playlists.extend(synced_playlists)
+                refreshed = next(
+                    (
+                        playlist
+                        for playlist in remote_playlists
+                        if (target_playlist.dirid and playlist.dirid == target_playlist.dirid) or playlist.id == target_playlist.id
+                    ),
+                    target_playlist,
+                )
+                current_playlist = refreshed
+                refresh_playlist_list()
+                set_busy(False, "歌曲已移除，歌单已同步")
+                load_playlist()
+
+            root.after(0, update)
 
         threading.Thread(target=worker, daemon=True).start()
 
