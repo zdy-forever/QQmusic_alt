@@ -16,15 +16,93 @@
 
 # QQ Music Linux Client
 
-一个给 Linux Mint 用的简化 QQ 音乐客户端。它使用网络上的 QQ Music API 做搜索、歌词和播放链接获取，然后把音频 URL 交给本机播放器播放。
+一个给 Linux Mint 用的简化 QQ 音乐客户端。它主要使用 QQ 音乐网页接口做搜索、歌词、播放链接和歌单操作，然后把音频 URL 交给本机播放器播放。
 
 ## 说明
 
 - 不绕过会员、DRM、地区限制、登录限制或付费限制。
-- 默认 API: `https://api.ygking.top`
-- 可通过环境变量 `QQMUSIC_API_BASE` 换成你自己部署或信任的兼容 API。
-- 如果安装了 `python-vlc`，会优先用内嵌 VLC 播放，避免每首歌弹出一个 VLC 窗口；否则回退到本机播放器。
+- 当前版本主要使用 QQ 音乐网页接口；`QQMUSIC_API_BASE` 兼容参数仍保留，但核心的搜索、登录、歌单和播放链接不依赖第三方 API。
+- 如果安装了 `python-vlc` 和 VLC/libVLC，会优先用内嵌 VLC 播放，避免每首歌弹出一个 VLC 窗口；否则回退到本机播放器。
 - 登录信息保存在本机 `.qqmusic_auth.json`，不要把这个文件分享给别人。
+
+## 运行前准备
+
+这个项目只有一个 Python 脚本，基础功能主要使用 Python 标准库。图形界面需要 `tkinter`，内嵌播放器是可选的。
+
+最低建议：
+
+- Python 3.10 或更新版本。
+- 图形界面：`tkinter`。Linux Mint/Ubuntu 上通常安装 `python3-tk`。
+- 播放器：建议安装 `vlc`、`mpv` 或 `ffmpeg` 里的 `ffplay`。如果都没有，程序会尝试用系统默认方式打开播放链接。
+- 可选内嵌播放：`python-vlc` 加 VLC/libVLC。
+
+### 直接使用系统 Python
+
+Linux Mint/Ubuntu：
+
+```bash
+sudo apt update
+sudo apt install python3 python3-tk vlc
+```
+
+如果想启用内嵌 VLC 播放：
+
+```bash
+sudo apt install python3-vlc
+```
+
+然后运行：
+
+```bash
+python3 qqmusic_client.py
+```
+
+如果系统仓库里的 `python3-vlc` 不可用，也可以用虚拟环境安装：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install python-vlc
+python qqmusic_client.py
+```
+
+### 使用 uv
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install python-vlc
+python qqmusic_client.py
+```
+
+如果只想使用外部播放器，不需要安装 `python-vlc`：
+
+```bash
+uv venv
+source .venv/bin/activate
+python qqmusic_client.py
+```
+
+系统层面仍建议安装 `python3-tk` 和一个播放器：
+
+```bash
+sudo apt install python3-tk vlc
+```
+
+### 使用 Miniconda/Conda
+
+```bash
+conda create -n qqmusic-alt python=3.12 tk
+conda activate qqmusic-alt
+pip install python-vlc
+python qqmusic_client.py
+```
+
+如果 Conda 环境里没有 VLC/libVLC，可以在系统里安装 VLC：
+
+```bash
+sudo apt install vlc
+```
 
 ## 图形界面
 
@@ -96,22 +174,18 @@ python3 qqmusic_client.py lyric 稻香
 
 ## 可选配置
 
-安装内嵌 VLC 播放支持：
-
-```bash
-sudo apt install python3-vlc
-```
-
 指定播放器：
 
 ```bash
 QQMUSIC_PLAYER=/usr/bin/vlc python3 qqmusic_client.py
 ```
 
-指定 API：
+保留的兼容 API 参数：
 
 ```bash
 QQMUSIC_API_BASE=https://api.ygking.top python3 qqmusic_client.py
 ```
+
+当前核心功能主要走 QQ 音乐网页接口；这个参数只建议在你明确知道自己需要兼容 API 时使用。
 
 如果播放失败但搜索正常，通常是歌曲本身有会员、版权、地区或登录限制。可以尝试把音质切到 `128`。
