@@ -2102,7 +2102,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             line = current_lyric_lines[active]
             lyric_text.tag_add("active_lyric", line.start_index, line.end_index)
             lyric_text.see(line.start_index)
-            player_meta_var.set(f"{line.text} · {play_mode_var.get()}")
+            player_meta_var.set(line.text)
             current_lyric_index = active
         root.after(500, update_realtime_lyrics)
 
@@ -2923,7 +2923,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                 nonlocal playback_started_at
                 playback_started_at = time.monotonic()
                 set_busy(False)
-                player_meta_var.set(f"{song.singers or '正在播放'} · {play_mode_var.get()}")
+                player_meta_var.set(song.singers or song.album or "正在播放")
                 threading.Thread(target=monitor_playback, args=(play_token,), daemon=True).start()
 
             root.after(0, update_started)
