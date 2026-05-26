@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QQ Music Web Browser</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">Q</div>
+          <div>
+            <h1>QQ Music</h1>
+            <p id="accountText">未登录</p>
+          </div>
+        </div>
+
+        <div class="account-actions">
+          <button id="accountButton" class="primary">登录</button>
+          <button id="syncButton">同步</button>
+        </div>
+
+        <section class="playlist-section">
+          <div class="section-heading">
+            <span>我的歌单</span>
+            <small id="playlistCount">0</small>
+          </div>
+          <div class="playlist-actions">
+            <button id="newPlaylistButton">新建歌单</button>
+            <button id="renamePlaylistButton">重命名</button>
+            <button id="deletePlaylistButton" class="danger">删除歌单</button>
+          </div>
+          <div id="playlistList" class="playlist-list"></div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="search-wrap">
+            <input id="searchInput" type="search" autocomplete="off" placeholder="搜索歌曲、歌手、专辑" />
+            <button id="searchButton" class="primary">搜索</button>
+          </div>
+          <div class="quality-wrap">
+            <label for="qualitySelect">音质</label>
+            <select id="qualitySelect">
+              <option value="128">128</option>
+              <option value="320" selected>320</option>
+              <option value="flac">FLAC</option>
+            </select>
+          </div>
+        </header>
+
+        <section class="hero-player">
+          <div class="cover-stage">
+            <img id="coverImage" alt="" src="" />
+            <div class="cover-fallback">QQ</div>
+            <div class="pulse-ring"></div>
+          </div>
+          <div class="track-copy">
+            <div id="sourceLabel" class="source-label">队列</div>
+            <h2 id="trackTitle">选择一首歌开始播放</h2>
+            <p id="trackMeta">搜索、打开歌单或同步账号后开始听歌</p>
+            <div class="meter" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+          </div>
+        </section>
+
+        <section class="content-grid">
+          <div class="queue-panel">
+            <div class="panel-head">
+              <div>
+                <h3>歌曲队列</h3>
+                <p id="queueSummary">0 首</p>
+              </div>
+              <div class="queue-actions">
+                <button id="addButton">加入歌单</button>
+                <button id="removeButton">移除</button>
+                <button id="downloadButton">下载</button>
+              </div>
+            </div>
+            <div id="songList" class="song-list"></div>
+          </div>
+
+          <aside class="detail-panel">
+            <div class="panel-head">
+              <div>
+                <h3>歌曲信息</h3>
+                <p id="detailMeta">未选择</p>
+              </div>
+            </div>
+            <div id="songInfo" class="song-info"></div>
+            <div class="lyrics-shell">
+              <h3>歌词</h3>
+              <div id="lyrics" class="lyrics"></div>
+            </div>
+          </aside>
+        </section>
+      </main>
+    </div>
+
+    <footer class="playerbar">
+      <div class="transport">
+        <button id="prevButton">上一首</button>
+        <button id="playButton" class="primary">播放</button>
+        <button id="stopButton">停止</button>
+        <button id="nextButton">下一首</button>
+        <select id="playModeSelect">
+          <option value="顺序播放">顺序播放</option>
+          <option value="随机播放">随机播放</option>
+          <option value="单曲循环">单曲循环</option>
+        </select>
+      </div>
+      <div class="timeline">
+        <span id="currentTime">0:00</span>
+        <input id="progress" type="range" min="0" max="1000" value="0" />
+        <span id="durationTime">0:00</span>
+      </div>
+      <audio id="audio"></audio>
+    </footer>
+
+    <div id="loginModal" class="modal hidden">
+      <div class="modal-panel">
+        <button class="modal-close" data-close="loginModal">×</button>
+        <h2>登录 QQ 音乐</h2>
+        <div class="login-tabs">
+          <button data-provider="qq" class="active">QQ 登录</button>
+          <button data-provider="wechat">微信登录</button>
+        </div>
+        <div class="qr-box">
+          <img id="qrImage" alt="登录二维码" />
+        </div>
+        <p id="loginStatus">请选择登录方式</p>
+      </div>
+    </div>
+
+    <div id="playlistModal" class="modal hidden">
+      <div class="modal-panel playlist-picker">
+        <button class="modal-close" data-close="playlistModal">×</button>
+        <h2>加入歌单</h2>
+        <div id="playlistPickerList" class="picker-list"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
