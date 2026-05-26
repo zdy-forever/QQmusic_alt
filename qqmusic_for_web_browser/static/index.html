@@ -145,6 +145,51 @@
       </div>
     </div>
 
+    <div id="settingsModal" class="modal hidden">
+      <div class="modal-panel settings-panel">
+        <button class="modal-close" data-close="settingsModal">×</button>
+        <h2>设置</h2>
+        <div class="settings-grid">
+          <label>
+            <span>默认音质</span>
+            <select id="settingQualitySelect">
+              <option value="128">128</option>
+              <option value="320">320</option>
+              <option value="flac">FLAC</option>
+            </select>
+          </label>
+          <label>
+            <span>播放模式</span>
+            <select id="settingPlayModeSelect">
+              <option value="顺序播放">顺序播放</option>
+              <option value="随机播放">随机播放</option>
+              <option value="单曲循环">单曲循环</option>
+            </select>
+          </label>
+          <label>
+            <span>首批加载</span>
+            <input id="settingInitialPageSize" type="number" min="1" max="500" step="1" />
+          </label>
+          <label>
+            <span>追加批量</span>
+            <input id="settingBackgroundPageSize" type="number" min="50" max="1000" step="50" />
+          </label>
+          <label class="setting-check">
+            <input id="settingAutoSync" type="checkbox" />
+            <span>启动后自动同步歌单</span>
+          </label>
+        </div>
+        <div class="settings-files">
+          <div>登录信息：<code id="authFilePath"></code></div>
+          <div>设置文件：<code id="settingsFilePath"></code></div>
+        </div>
+        <div class="modal-actions">
+          <button data-close="settingsModal">取消</button>
+          <button id="saveSettingsButton" class="primary">保存</button>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
     <script src="/app.js"></script>
   </body>

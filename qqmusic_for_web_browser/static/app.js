@@ -1,5 +1,5 @@
-const INITIAL_PAGE_SIZE = 50;
-const BACKGROUND_PAGE_SIZE = 500;
+let INITIAL_PAGE_SIZE = 50;
+let BACKGROUND_PAGE_SIZE = 500;
 
 const $ = (id) => document.getElementById(id);
 const audio = $("audio");
@@ -12,12 +12,15 @@ const state = {
   songs: [],
   selectedIndex: -1,
   playIndex: -1,
-  playMode: localStorage.getItem("qqmusic.playMode") || "顺序播放",
+  playMode: "顺序播放",
+  settings: {},
+  settingsFiles: {},
   loadToken: 0,
   lyricLines: [],
   activeLyric: -1,
   pendingAddSong: null,
   loginPoll: null,
+  loginToken: 0,
 };
 
 function escapeHtml(value) {
@@ -168,17 +171,46 @@ function clearQueue(label = "队列") {
 }
 
 async function init() {
-  $("playModeSelect").value = state.playMode;
   bindEvents();
   try {
+    await loadSettings();
     const data = await api("/api/state");
     state.loggedIn = data.logged_in;
     state.account = data.account || "";
     updateAccount();
-    if (state.loggedIn) await syncPlaylists(false);
+    if (state.loggedIn && state.settings.auto_sync_playlists !== false) await syncPlaylists(false);
   } catch (error) {
     toast(error.message);
   }
+}
+
+async function loadSettings() {
+  const data = await api("/api/settings");
+  state.settings = data.settings || {};
+  state.settingsFiles = data.files || {};
+  applySettings();
+}
+
+function applySettings() {
+  INITIAL_PAGE_SIZE = Number(state.settings.initial_page_size || 50);
+  BACKGROUND_PAGE_SIZE = Number(state.settings.background_page_size || 500);
+  state.playMode = state.settings.play_mode || "顺序播放";
+  $("qualitySelect").value = state.settings.quality || "320";
+  $("playModeSelect").value = state.playMode;
+  $("settingQualitySelect").value = state.settings.quality || "320";
+  $("settingPlayModeSelect").value = state.playMode;
+  $("settingInitialPageSize").value = INITIAL_PAGE_SIZE;
+  $("settingBackgroundPageSize").value = BACKGROUND_PAGE_SIZE;
+  $("settingAutoSync").checked = state.settings.auto_sync_playlists !== false;
+  $("authFilePath").textContent = state.settingsFiles.auth || "";
+  $("settingsFilePath").textContent = state.settingsFiles.settings || "";
+}
+
+async function saveSettings(partial, showToast = false) {
+  const data = await api("/api/settings", { method: "PUT", body: { ...state.settings, ...partial } });
+  state.settings = data.settings || state.settings;
+  applySettings();
+  if (showToast) toast("设置已保存");
 }
 
 async function syncPlaylists(showToast = true) {
@@ -375,17 +407,31 @@ function closeModal(id) {
   $(id).classList.add("hidden");
 }
 
+function setLoginProvider(provider) {
+  document.querySelectorAll(".login-tabs button").forEach((node) => {
+    node.classList.toggle("active", node.dataset.provider === provider);
+  });
+}
+
 async function startLogin(provider) {
-  $("loginStatus").textContent = "正在生成二维码...";
+  setLoginProvider(provider);
+  clearInterval(state.loginPoll);
+  state.loginToken += 1;
+  const token = state.loginToken;
+  const label = provider === "wechat" ? "微信" : "QQ";
+  $("loginStatus").textContent = `正在生成${label}登录二维码...`;
   $("qrImage").removeAttribute("src");
   try {
     const data = await api("/api/login/start", { method: "POST", body: { provider } });
+    if (token !== state.loginToken) return;
+    if (data.provider !== provider) throw new Error("登录方式返回不一致，请重新打开登录窗口");
     $("qrImage").src = data.image;
-    $("loginStatus").textContent = "扫码后在手机上确认";
-    clearInterval(state.loginPoll);
+    $("loginStatus").textContent = provider === "wechat" ? "请使用微信扫码并确认" : "请使用手机 QQ 扫码并确认";
     state.loginPoll = setInterval(async () => {
       try {
+        if (token !== state.loginToken) return;
         const poll = await api(`/api/login/poll?${qs({ id: data.id })}`);
+        if (token !== state.loginToken) return;
         if (poll.state === "done") {
           clearInterval(state.loginPoll);
           state.loggedIn = true;
@@ -557,7 +603,10 @@ function bindEvents() {
   });
   $("playModeSelect").addEventListener("change", () => {
     state.playMode = $("playModeSelect").value;
-    localStorage.setItem("qqmusic.playMode", state.playMode);
+    saveSettings({ play_mode: state.playMode }).catch((error) => toast(error.message, 4200));
+  });
+  $("qualitySelect").addEventListener("change", () => {
+    saveSettings({ quality: $("qualitySelect").value }).catch((error) => toast(error.message, 4200));
   });
   $("progress").addEventListener("input", () => {
     if (Number.isFinite(audio.duration) && audio.duration > 0) {
@@ -582,12 +631,16 @@ function bindEvents() {
     if (index >= 0) playAt(index);
   });
   document.querySelectorAll("[data-close]").forEach((button) => {
-    button.addEventListener("click", () => closeModal(button.dataset.close));
+    button.addEventListener("click", () => {
+      if (button.dataset.close === "loginModal") {
+        clearInterval(state.loginPoll);
+        state.loginToken += 1;
+      }
+      closeModal(button.dataset.close);
+    });
   });
   document.querySelectorAll(".login-tabs button").forEach((button) => {
     button.addEventListener("click", () => {
-      document.querySelectorAll(".login-tabs button").forEach((node) => node.classList.remove("active"));
-      button.classList.add("active");
       startLogin(button.dataset.provider);
     });
   });
@@ -601,6 +654,17 @@ function bindEvents() {
   $("addButton").addEventListener("click", openAddDialog);
   $("removeButton").addEventListener("click", () => removeFromPlaylist().catch((error) => toast(error.message, 4200)));
   $("downloadButton").addEventListener("click", downloadSelected);
+  const settingsButton = $("settingsButton");
+  if (settingsButton) settingsButton.addEventListener("click", () => openModal("settingsModal"));
+  $("saveSettingsButton").addEventListener("click", () => {
+    saveSettings({
+      quality: $("settingQualitySelect").value,
+      play_mode: $("settingPlayModeSelect").value,
+      initial_page_size: Number($("settingInitialPageSize").value || 50),
+      background_page_size: Number($("settingBackgroundPageSize").value || 500),
+      auto_sync_playlists: $("settingAutoSync").checked,
+    }, true).then(() => closeModal("settingsModal")).catch((error) => toast(error.message, 4200));
+  });
 }
 
 init();

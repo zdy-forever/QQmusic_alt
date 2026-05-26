@@ -34,6 +34,7 @@ QQMUSIC_WEB_PORT=8787 python3 server.py
 
 ## 说明
 
-- 登录信息仍保存在 `qqmusic_for_pc/.qqmusic_auth.json`，Web 版和 PC 版共用。
+- 登录信息保存在 `qqmusic_for_web_browser/.qqmusic_auth.json`。
+- 设置保存在 `qqmusic_for_web_browser/.qqmusic_settings.json`。
 - 浏览器不能可靠直连 QQ 音乐接口，所以本地后端负责请求 QQ 音乐、保存登录态和代理下载。
 - 不绕过会员、DRM、地区限制、登录限制或付费限制。

@@ -40,6 +40,7 @@ QQ_QR_APPID = "716027609"
 QQ_QR_THIRD_APPID = "100497308"
 WX_QR_APPID = "wx48db31d50e334801"
 WX_QR_REDIRECT_URI = "https://y.qq.com/portal/wx_redirect.html?login_type=2&surl=https%3A%2F%2Fy.qq.com%2F"
+QQ_QR_REDIRECT_URI = "https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https%3A%2F%2Fy.qq.com%2F"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "queue_show_singers": True,
@@ -463,7 +464,7 @@ class QQMusicAPI:
             {
                 "response_type": "code",
                 "client_id": QQ_QR_THIRD_APPID,
-                "redirect_uri": "https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/",
+                "redirect_uri": QQ_QR_REDIRECT_URI,
                 "scope": "get_user_info,get_app_friends",
                 "state": "state",
                 "switch": "",

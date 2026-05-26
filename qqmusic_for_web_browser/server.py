@@ -29,6 +29,10 @@ ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 PC_DIR = REPO_ROOT / "qqmusic_for_pc"
 STATIC_DIR = ROOT / "static"
+
+os.environ["QQMUSIC_AUTH_FILE"] = str(ROOT / ".qqmusic_auth.json")
+os.environ["QQMUSIC_SETTINGS_FILE"] = str(ROOT / ".qqmusic_settings.json")
+
 sys.path.insert(0, str(PC_DIR))
 
 from qqmusic_client import (  # noqa: E402
@@ -44,6 +48,68 @@ from qqmusic_client import (  # noqa: E402
     parse_lrc_lines,
     save_auth,
 )
+
+WEB_DEFAULT_SETTINGS: dict[str, Any] = {
+    "quality": "320",
+    "play_mode": "顺序播放",
+    "initial_page_size": 50,
+    "background_page_size": 500,
+    "auto_sync_playlists": True,
+}
+
+
+def settings_path() -> Path:
+    return ROOT / ".qqmusic_settings.json"
+
+
+def load_web_settings() -> dict[str, Any]:
+    settings = dict(WEB_DEFAULT_SETTINGS)
+    if not settings_path().exists():
+        with settings_path().open("w", encoding="utf-8") as file:
+            json.dump(settings, file, ensure_ascii=False, indent=2)
+        return settings
+    try:
+        with settings_path().open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        with settings_path().open("w", encoding="utf-8") as file:
+            json.dump(settings, file, ensure_ascii=False, indent=2)
+        return settings
+    if isinstance(data, dict):
+        settings.update({key: data[key] for key in WEB_DEFAULT_SETTINGS if key in data})
+    return normalize_web_settings(settings)
+
+
+def normalize_web_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    def bounded_int(key: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(settings.get(key) or default)
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    quality = str(settings.get("quality") or "320")
+    if quality not in {"128", "320", "flac"}:
+        quality = "320"
+    play_mode = str(settings.get("play_mode") or "顺序播放")
+    if play_mode not in {"顺序播放", "随机播放", "单曲循环"}:
+        play_mode = "顺序播放"
+    return {
+        "quality": quality,
+        "play_mode": play_mode,
+        "initial_page_size": bounded_int("initial_page_size", 50, 1, 500),
+        "background_page_size": bounded_int("background_page_size", 500, 50, 1000),
+        "auto_sync_playlists": bool(settings.get("auto_sync_playlists", True)),
+    }
+
+
+def save_web_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    current = load_web_settings()
+    current.update({key: value for key, value in settings.items() if key in WEB_DEFAULT_SETTINGS})
+    current = normalize_web_settings(current)
+    with settings_path().open("w", encoding="utf-8") as file:
+        json.dump(current, file, ensure_ascii=False, indent=2)
+    return current
 
 
 api = QQMusicAPI(timeout=int(os.environ.get("QQMUSIC_TIMEOUT", DEFAULT_TIMEOUT)))
@@ -202,6 +268,19 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True, "logged_in": bool(auth.get("qq_number")), "account": auth.get("qq_number", "")})
             return
 
+        if path == "/api/settings":
+            self.send_json(
+                {
+                    "ok": True,
+                    "settings": load_web_settings(),
+                    "files": {
+                        "auth": str(Path(os.environ["QQMUSIC_AUTH_FILE"])),
+                        "settings": str(settings_path()),
+                    },
+                }
+            )
+            return
+
         if path == "/api/login/poll":
             session_id = self.first_query(query, "id")
             with login_lock:
@@ -283,6 +362,10 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/logout" and method == "POST":
             clear_auth()
             self.send_json({"ok": True})
+            return
+
+        if path == "/api/settings" and method == "PUT":
+            self.send_json({"ok": True, "settings": save_web_settings(payload)})
             return
 
         if path == "/api/playlists" and method == "POST":

@@ -1,0 +1,5 @@
+{
+  "base_url": "http://10.0.2.2:8765",
+  "quality": "320",
+  "initial_page_size": 50
+}

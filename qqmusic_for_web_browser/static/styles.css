@@ -153,8 +153,20 @@ p {
 }
 
 .account-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
+}
+
+.account-actions button {
+  min-width: 0;
+  height: 48px;
+  padding-inline: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 1.1;
 }
 
 .playlist-section {
@@ -332,7 +344,8 @@ p {
   gap: 10px;
 }
 
-input[type="search"] {
+input[type="search"],
+input[type="number"] {
   width: 100%;
   height: 44px;
   border: 1px solid var(--line);
@@ -343,7 +356,8 @@ input[type="search"] {
   padding: 0 14px;
 }
 
-input[type="search"]:focus {
+input[type="search"]:focus,
+input[type="number"]:focus {
   border-color: rgba(34, 197, 94, 0.62);
   box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12);
 }
@@ -694,6 +708,51 @@ input[type="range"] {
 
 .playlist-picker {
   width: min(520px, calc(100vw - 32px));
+}
+
+.settings-panel {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.settings-grid label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.settings-grid select {
+  width: 100%;
+}
+
+.setting-check {
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: center;
+}
+
+.settings-files {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 .picker-list {
