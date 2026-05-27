@@ -340,24 +340,33 @@ p {
 
 .search-wrap {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 132px auto;
   gap: 10px;
 }
 
 input[type="search"],
-input[type="number"] {
+input[type="number"],
+.phone-row input,
+.netease-login textarea {
   width: 100%;
-  height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   outline: none;
   background: rgba(2, 6, 23, 0.64);
   color: var(--text);
+}
+
+input[type="search"],
+input[type="number"],
+.phone-row input {
+  height: 44px;
   padding: 0 14px;
 }
 
 input[type="search"]:focus,
-input[type="number"]:focus {
+input[type="number"]:focus,
+.phone-row input:focus,
+.netease-login textarea:focus {
   border-color: rgba(34, 197, 94, 0.62);
   box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.12);
 }
@@ -704,6 +713,28 @@ input[type="range"] {
   margin-top: 12px;
   color: var(--muted);
   text-align: center;
+}
+
+.netease-login {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.phone-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.phone-row + .phone-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.netease-login textarea {
+  min-height: 92px;
+  resize: vertical;
+  padding: 12px;
 }
 
 .playlist-picker {

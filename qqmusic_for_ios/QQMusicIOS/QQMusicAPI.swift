@@ -15,6 +15,11 @@ final class QQMusicAPI {
         let _: EmptyResponse = try await request("/api/logout", method: "POST")
     }
 
+    func updatePlatform(_ platform: String) async throws {
+        let body = ["platform": platform]
+        let _: EmptyResponse = try await request("/api/settings", method: "PUT", body: body)
+    }
+
     func playlists() async throws -> [Playlist] {
         let response: PlaylistsResponse = try await request("/api/playlists")
         return response.playlists

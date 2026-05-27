@@ -17,6 +17,8 @@ final class QQMusicViewModel: ObservableObject {
     @Published var selectedSong: Song?
     @Published var query = ""
     @Published var lyric = ""
+    @Published var platform = "qqmusic"
+    @Published var platformName = "QQ 音乐"
 
     let player = AudioPlayer()
     let store = LocalJsonStore()
@@ -27,12 +29,16 @@ final class QQMusicViewModel: ObservableObject {
     init() {
         let settings = store.loadSettings()
         baseURLText = settings.baseURL
+        platform = settings.platform
+        platformName = settings.platform == "netease" ? "网易云音乐" : "QQ 音乐"
     }
 
     func refreshAll() async {
         do {
             let state = try await api.state()
             account = state.account
+            platform = state.platform
+            platformName = state.platformName
             store.saveAuth(account: state.account, provider: state.loggedIn ? "backend" : "")
             guard state.loggedIn else {
                 playlists = []
@@ -48,6 +54,26 @@ final class QQMusicViewModel: ObservableObject {
                 songs = try await api.playlistSongs(selectedPlaylist.id)
             }
             status = "已同步"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+
+    func switchPlatform(_ nextPlatform: String) async {
+        do {
+            try await api.updatePlatform(nextPlatform)
+            var settings = store.loadSettings()
+            settings.platform = nextPlatform
+            store.saveSettings(settings)
+            platform = nextPlatform
+            platformName = nextPlatform == "netease" ? "网易云音乐" : "QQ 音乐"
+            account = ""
+            playlists = []
+            songs = []
+            selectedPlaylist = nil
+            selectedSong = nil
+            player.stop()
+            await refreshAll()
         } catch {
             status = error.localizedDescription
         }
@@ -158,7 +184,7 @@ private struct Sidebar: View {
             HStack(spacing: 12) {
                 Logo()
                 VStack(alignment: .leading) {
-                    Text("QQ Music").font(.title2.bold())
+                    Text(model.platformName).font(.title2.bold())
                     Text(model.account.isEmpty ? "未登录" : "已登录：\(model.account)")
                         .foregroundStyle(.secondary)
                 }
@@ -174,16 +200,24 @@ private struct Sidebar: View {
                     Task { await model.refreshAll() }
                 }
                 if model.account.isEmpty {
-                    Button("QQ 登录") {
-                        guard !MobileAuthProvider.openQQAuth() else { return }
-                        if let url = URL(string: model.baseURLText) {
-                            MobileAuthProvider.openBackendLogin(baseURL: url)
+                    if model.platform == "netease" {
+                        Button("网易云登录") {
+                            if let url = URL(string: model.baseURLText) {
+                                MobileAuthProvider.openBackendLogin(baseURL: url)
+                            }
                         }
-                    }
-                    Button("微信登录") {
-                        guard !MobileAuthProvider.openWeChatAuth() else { return }
-                        if let url = URL(string: model.baseURLText) {
-                            MobileAuthProvider.openBackendLogin(baseURL: url)
+                    } else {
+                        Button("QQ 登录") {
+                            guard !MobileAuthProvider.openQQAuth() else { return }
+                            if let url = URL(string: model.baseURLText) {
+                                MobileAuthProvider.openBackendLogin(baseURL: url)
+                            }
+                        }
+                        Button("微信登录") {
+                            guard !MobileAuthProvider.openWeChatAuth() else { return }
+                            if let url = URL(string: model.baseURLText) {
+                                MobileAuthProvider.openBackendLogin(baseURL: url)
+                            }
                         }
                     }
                 } else {
@@ -235,6 +269,9 @@ private struct MainPanel: View {
             HStack {
                 TextField("搜索歌曲、歌手、专辑", text: $model.query)
                     .textFieldStyle(.roundedBorder)
+                Button(model.platform == "netease" ? "网易云" : "QQ 音乐") {
+                    Task { await model.switchPlatform(model.platform == "netease" ? "qqmusic" : "netease") }
+                }
                 Button("搜索") { Task { await model.search() } }
             }
 

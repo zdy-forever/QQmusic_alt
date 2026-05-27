@@ -82,6 +82,13 @@ data class LocalSettings(
     val baseUrl: String = "http://10.0.2.2:8765",
     val quality: String = "320",
     val initialPageSize: Int = 50,
+    val platform: String = "qqmusic",
+)
+
+data class BackendState(
+    val account: String = "",
+    val platform: String = "qqmusic",
+    val platformName: String = "QQ 音乐",
 )
 
 class MainActivity : ComponentActivity() {
@@ -128,6 +135,8 @@ private fun QQMusicApp() {
     var selectedSong by remember { mutableStateOf<Song?>(null) }
     var query by remember { mutableStateOf("") }
     var lyric by remember { mutableStateOf("") }
+    var platform by remember { mutableStateOf(savedSettings.platform) }
+    var platformName by remember { mutableStateOf(if (savedSettings.platform == "netease") "网易云音乐" else "QQ 音乐") }
 
     val api = remember(baseUrl) { QQMusicApi(baseUrl) }
 
@@ -143,9 +152,11 @@ private fun QQMusicApp() {
 
     suspend fun refreshAll() {
         val state = api.state()
-        account = state
-        store.saveAuth(state, if (state.isBlank()) "" else "backend")
-        if (state.isNotBlank()) {
+        account = state.account
+        platform = state.platform
+        platformName = state.platformName
+        store.saveAuth(state.account, if (state.account.isBlank()) "" else "backend")
+        if (state.account.isNotBlank()) {
             playlists = api.playlists()
             selectedPlaylist = playlists.firstOrNull()
             selectedPlaylist?.let { playlist ->
@@ -158,6 +169,20 @@ private fun QQMusicApp() {
             selectedPlaylist = null
             status = "未登录"
         }
+    }
+
+    suspend fun switchPlatform(nextPlatform: String) {
+        api.updatePlatform(nextPlatform)
+        platform = nextPlatform
+        platformName = if (nextPlatform == "netease") "网易云音乐" else "QQ 音乐"
+        store.saveSettings(savedSettings.copy(baseUrl = baseUrl, platform = nextPlatform))
+        account = ""
+        playlists = emptyList()
+        songs = emptyList()
+        selectedPlaylist = null
+        selectedSong = null
+        player.release()
+        refreshAll()
     }
 
     suspend fun openPlaylist(playlist: Playlist) {
@@ -180,7 +205,7 @@ private fun QQMusicApp() {
     }
 
     LaunchedEffect(baseUrl) {
-        store.saveSettings(savedSettings.copy(baseUrl = baseUrl))
+        store.saveSettings(store.loadSettings().copy(baseUrl = baseUrl))
     }
 
     DisposableEffect(Unit) {
@@ -199,6 +224,8 @@ private fun QQMusicApp() {
                 baseUrl = baseUrl,
                 onBaseUrlChange = { baseUrl = it },
                 account = account,
+                platform = platform,
+                platformName = platformName,
                 status = status,
                 onRefresh = { runTask { refreshAll() } },
                 onLogout = {
@@ -220,11 +247,17 @@ private fun QQMusicApp() {
                         uriHandler.openUri(baseUrl)
                     }
                 },
+                onNeteaseLogin = {
+                    status = "请在浏览器里使用手机号验证码或 Cookie 登录网易云"
+                    uriHandler.openUri(baseUrl)
+                },
             )
 
             SearchBar(
                 query = query,
                 onQueryChange = { query = it },
+                platform = platform,
+                onPlatformChange = { next -> runTask { switchPlatform(next) } },
                 onSearch = {
                     runTask {
                         songs = api.search(query)
@@ -301,11 +334,14 @@ private fun Header(
     baseUrl: String,
     onBaseUrlChange: (String) -> Unit,
     account: String,
+    platform: String,
+    platformName: String,
     status: String,
     onRefresh: () -> Unit,
     onLogout: () -> Unit,
     onQQLogin: () -> Unit,
     onWeChatLogin: () -> Unit,
+    onNeteaseLogin: () -> Unit,
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -313,7 +349,7 @@ private fun Header(
                 LogoBox()
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("QQ Music", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Text(platformName, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     Text(if (account.isBlank()) "未登录" else "已登录：$account", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Text(status, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -328,8 +364,12 @@ private fun Header(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onRefresh) { Text("同步") }
                 if (account.isBlank()) {
-                    OutlinedButton(onClick = onQQLogin) { Text("QQ 登录") }
-                    OutlinedButton(onClick = onWeChatLogin) { Text("微信登录") }
+                    if (platform == "netease") {
+                        OutlinedButton(onClick = onNeteaseLogin) { Text("网易云登录") }
+                    } else {
+                        OutlinedButton(onClick = onQQLogin) { Text("QQ 登录") }
+                        OutlinedButton(onClick = onWeChatLogin) { Text("微信登录") }
+                    }
                 } else {
                     OutlinedButton(onClick = onLogout) { Text("退出登录") }
                 }
@@ -339,7 +379,13 @@ private fun Header(
 }
 
 @Composable
-private fun SearchBar(query: String, onQueryChange: (String) -> Unit, onSearch: () -> Unit) {
+private fun SearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    platform: String,
+    onPlatformChange: (String) -> Unit,
+    onSearch: () -> Unit,
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
             modifier = Modifier.weight(1f),
@@ -348,6 +394,9 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit, onSearch: 
             singleLine = true,
             label = { Text("搜索歌曲、歌手、专辑") },
         )
+        OutlinedButton(onClick = { onPlatformChange(if (platform == "netease") "qqmusic" else "netease") }) {
+            Text(if (platform == "netease") "网易云" else "QQ 音乐")
+        }
         Button(onClick = onSearch) { Text("搜索") }
     }
 }
@@ -499,9 +548,17 @@ private fun Cover() {
 }
 
 class QQMusicApi(private val baseUrl: String) {
-    suspend fun state(): String {
+    suspend fun state(): BackendState {
         val json = request("GET", "/api/state")
-        return json.optString("account")
+        return BackendState(
+            account = json.optString("account"),
+            platform = json.optString("platform", "qqmusic"),
+            platformName = json.optString("platform_name", "QQ 音乐"),
+        )
+    }
+
+    suspend fun updatePlatform(platform: String) {
+        request("PUT", "/api/settings", JSONObject().put("platform", platform))
     }
 
     suspend fun logout() {
@@ -613,6 +670,7 @@ class LocalJsonStore(private val context: Context) {
                 baseUrl = json.optString("base_url", "http://10.0.2.2:8765"),
                 quality = json.optString("quality", "320"),
                 initialPageSize = json.optInt("initial_page_size", 50),
+                platform = json.optString("platform", "qqmusic"),
             )
         } catch (_: Exception) {
             LocalSettings()
@@ -624,6 +682,7 @@ class LocalJsonStore(private val context: Context) {
             .put("base_url", settings.baseUrl)
             .put("quality", settings.quality)
             .put("initial_page_size", settings.initialPageSize)
+            .put("platform", settings.platform)
         settingsFile.writeText(json.toString(2), Charsets.UTF_8)
     }
 

@@ -13,6 +13,8 @@ const state = {
   selectedIndex: -1,
   playIndex: -1,
   playMode: "顺序播放",
+  platform: "qqmusic",
+  platformName: "QQ 音乐",
   settings: {},
   settingsFiles: {},
   loadToken: 0,
@@ -78,7 +80,7 @@ function songCover(song, size = 150) {
 }
 
 function updateAccount() {
-  $("accountText").textContent = state.loggedIn ? `已登录: ${state.account}` : "未登录";
+  $("accountText").textContent = state.loggedIn ? `${state.platformName}已登录: ${state.account}` : `${state.platformName}未登录`;
   $("accountButton").textContent = state.loggedIn ? "退出登录" : "登录";
   $("syncButton").disabled = !state.loggedIn;
   $("newPlaylistButton").disabled = !state.loggedIn;
@@ -177,6 +179,8 @@ async function init() {
     const data = await api("/api/state");
     state.loggedIn = data.logged_in;
     state.account = data.account || "";
+    state.platform = data.platform || state.settings.platform || "qqmusic";
+    state.platformName = data.platform_name || platformLabel(state.platform);
     updateAccount();
     if (state.loggedIn && state.settings.auto_sync_playlists !== false) await syncPlaylists(false);
   } catch (error) {
@@ -195,6 +199,9 @@ function applySettings() {
   INITIAL_PAGE_SIZE = Number(state.settings.initial_page_size || 50);
   BACKGROUND_PAGE_SIZE = Number(state.settings.background_page_size || 500);
   state.playMode = state.settings.play_mode || "顺序播放";
+  state.platform = state.settings.platform || "qqmusic";
+  state.platformName = platformLabel(state.platform);
+  $("platformSelect").value = state.platform;
   $("qualitySelect").value = state.settings.quality || "320";
   $("playModeSelect").value = state.playMode;
   $("settingQualitySelect").value = state.settings.quality || "320";
@@ -206,11 +213,37 @@ function applySettings() {
   $("settingsFilePath").textContent = state.settingsFiles.settings || "";
 }
 
+function platformLabel(platform) {
+  return platform === "netease" ? "网易云音乐" : "QQ 音乐";
+}
+
 async function saveSettings(partial, showToast = false) {
   const data = await api("/api/settings", { method: "PUT", body: { ...state.settings, ...partial } });
   state.settings = data.settings || state.settings;
   applySettings();
   if (showToast) toast("设置已保存");
+  return state.settings;
+}
+
+async function switchPlatform(platform) {
+  const data = await saveSettings({ platform });
+  state.platform = data?.platform || platform;
+  state.platformName = platformLabel(state.platform);
+  state.loggedIn = false;
+  state.account = "";
+  state.playlists = [];
+  state.currentPlaylist = null;
+  audio.pause();
+  audio.removeAttribute("src");
+  clearQueue("队列");
+  const stateData = await api("/api/state");
+  state.loggedIn = stateData.logged_in;
+  state.account = stateData.account || "";
+  state.platform = stateData.platform || state.platform;
+  state.platformName = stateData.platform_name || platformLabel(state.platform);
+  updateAccount();
+  if (state.loggedIn && state.settings.auto_sync_playlists !== false) await syncPlaylists(false);
+  toast(`已切换到 ${state.platformName}`);
 }
 
 async function syncPlaylists(showToast = true) {
@@ -413,6 +446,14 @@ function setLoginProvider(provider) {
   });
 }
 
+function prepareLoginModal() {
+  $("loginTitle").textContent = `登录 ${state.platformName}`;
+  $("qqLoginPanel").classList.toggle("hidden", state.platform !== "qqmusic");
+  $("neteaseLoginPanel").classList.toggle("hidden", state.platform !== "netease");
+  $("loginStatus").textContent = state.platform === "netease" ? "请选择手机号验证码或 Cookie 登录" : "请选择登录方式";
+  $("qrImage").removeAttribute("src");
+}
+
 async function startLogin(provider) {
   setLoginProvider(provider);
   clearInterval(state.loginPoll);
@@ -467,6 +508,43 @@ async function logout() {
   toast("已退出登录");
 }
 
+async function sendNeteaseCaptcha() {
+  const phone = $("neteasePhone").value.trim();
+  const countryCode = $("neteaseCountryCode").value.trim() || "86";
+  if (!phone) return toast("请输入手机号");
+  $("loginStatus").textContent = "正在发送验证码...";
+  await api("/api/netease/captcha/send", { method: "POST", body: { phone, country_code: countryCode } });
+  $("loginStatus").textContent = "验证码已发送";
+}
+
+async function loginNeteasePhone() {
+  const phone = $("neteasePhone").value.trim();
+  const captcha = $("neteaseCaptcha").value.trim();
+  const countryCode = $("neteaseCountryCode").value.trim() || "86";
+  if (!phone || !captcha) return toast("请输入手机号和验证码");
+  $("loginStatus").textContent = "正在登录...";
+  const data = await api("/api/netease/login/phone", { method: "POST", body: { phone, captcha, country_code: countryCode } });
+  state.loggedIn = true;
+  state.account = data.account || "";
+  closeModal("loginModal");
+  updateAccount();
+  await syncPlaylists();
+  toast(`已登录: ${data.nickname || data.account}`);
+}
+
+async function loginNeteaseCookie() {
+  const cookie = $("neteaseCookie").value.trim();
+  if (!cookie) return toast("请先粘贴 Cookie");
+  $("loginStatus").textContent = "正在校验 Cookie...";
+  const data = await api("/api/netease/login/cookie", { method: "POST", body: { cookie } });
+  state.loggedIn = true;
+  state.account = data.account || "";
+  closeModal("loginModal");
+  updateAccount();
+  await syncPlaylists();
+  toast(`已登录: ${data.nickname || data.account}`);
+}
+
 async function createPlaylist() {
   const name = prompt("歌单名称");
   if (!name?.trim()) return;
@@ -500,7 +578,7 @@ function openAddDialog() {
   const song = state.songs[state.selectedIndex];
   if (!song) return toast("先选择一首歌");
   state.pendingAddSong = song;
-  const candidates = state.playlists.filter((playlist) => playlist.id);
+  const candidates = state.playlists.filter((playlist) => playlist.id && playlist.addable !== false);
   $("playlistPickerList").innerHTML = candidates.map((playlist) => `
     <button class="picker-item" data-target-playlist="${escapeHtml(playlist.dirid || playlist.id)}" data-target-id="${escapeHtml(playlist.id)}">
       <strong>${escapeHtml(playlist.name)}</strong>
@@ -553,9 +631,11 @@ function bindEvents() {
     if (state.loggedIn) logout().catch((error) => toast(error.message));
     else {
       openModal("loginModal");
-      startLogin("qq");
+      prepareLoginModal();
+      if (state.platform === "qqmusic") startLogin("qq");
     }
   });
+  $("platformSelect").addEventListener("change", () => switchPlatform($("platformSelect").value).catch((error) => toast(error.message, 4200)));
   $("syncButton").addEventListener("click", () => syncPlaylists().catch((error) => toast(error.message)));
   $("searchButton").addEventListener("click", () => searchSongs());
   $("searchInput").addEventListener("keydown", (event) => {
@@ -654,6 +734,15 @@ function bindEvents() {
   $("addButton").addEventListener("click", openAddDialog);
   $("removeButton").addEventListener("click", () => removeFromPlaylist().catch((error) => toast(error.message, 4200)));
   $("downloadButton").addEventListener("click", downloadSelected);
+  $("sendNeteaseCaptcha").addEventListener("click", () => sendNeteaseCaptcha().catch((error) => {
+    $("loginStatus").textContent = error.message;
+  }));
+  $("loginNeteasePhone").addEventListener("click", () => loginNeteasePhone().catch((error) => {
+    $("loginStatus").textContent = error.message;
+  }));
+  $("loginNeteaseCookie").addEventListener("click", () => loginNeteaseCookie().catch((error) => {
+    $("loginStatus").textContent = error.message;
+  }));
   const settingsButton = $("settingsButton");
   if (settingsButton) settingsButton.addEventListener("click", () => openModal("settingsModal"));
   $("saveSettingsButton").addEventListener("click", () => {

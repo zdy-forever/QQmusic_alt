@@ -144,12 +144,6 @@ class WXLoginSession:
 
 
 @dataclass
-class NeteaseQRLoginSession:
-    key: str
-    url: str
-
-
-@dataclass
 class QRLoginResult:
     qq_number: str
     cookie: str
@@ -1539,40 +1533,6 @@ class NeteaseMusicAPI:
             raise QQMusicError("这个 Cookie 没有有效网易云登录态，请确认包含 MUSIC_U")
         return QRLoginResult(qq_number=user_id, cookie=cookie, nickname=nickname)
 
-    def start_qr_login(self) -> NeteaseQRLoginSession:
-        self.ensure_anonymous_session()
-        payload = self._get_json(
-            "/api/login/qrcode/unikey",
-            {"type": 3, "timestamp": int(time.time() * 1000)},
-        )
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        key = str(payload.get("unikey") or data.get("unikey") or "")
-        if not key:
-            raise QQMusicError("没有拿到网易云扫码登录 key")
-        return NeteaseQRLoginSession(key=key, url=f"https://music.163.com/login?codekey={urllib.parse.quote(key)}")
-
-    def poll_qr_login(self, session: NeteaseQRLoginSession) -> tuple[str, QRLoginResult | None]:
-        payload = self._get_json(
-            "/api/login/qrcode/client/login",
-            {"key": session.key, "type": 3, "timestamp": int(time.time() * 1000)},
-        )
-        code = str(payload.get("code") or "")
-        if code == "800":
-            return "expired", None
-        if code == "801":
-            return "waiting", None
-        if code == "802":
-            return "confirming", None
-        if code == "803":
-            cookie_text = payload.get("cookie")
-            cookie_pairs_list = list(self.session_cookie_pairs)
-            if isinstance(cookie_text, str) and cookie_text:
-                cookie_pairs_list = merge_cookie_pairs(cookie_pairs_list, [pair.strip() for pair in cookie_text.split(";") if "=" in pair])
-            cookie = "; ".join(cookie_pairs_list)
-            return "done", self.login_with_cookie(cookie)
-        message = payload.get("message") or payload.get("msg") or f"扫码登录失败（错误码: {code or '未知'}）"
-        raise QQMusicError(str(message))
-
     def search(self, keyword: str, count: int = 30, page: int = 1, cookie: str = "") -> list[Song]:
         payload, _cookies = self._post_form_json(
             "/api/cloudsearch/pc",
@@ -1593,19 +1553,62 @@ class NeteaseMusicAPI:
 
     def song_url(self, mid: str, quality: str = "320", cookie: str = "", media_mid: str = "") -> str:
         bitrates = {"128": 128000, "320": 320000, "flac": 999000}
+        levels = {
+            "128": ("standard", "128"),
+            "320": ("exhigh", "standard", "128"),
+            "flac": ("lossless", "exhigh", "standard", "128"),
+        }
         song_id = media_mid or mid
-        for br in (bitrates.get(quality, 320000), 320000, 128000):
+        normalized_id = int(song_id) if str(song_id).isdigit() else song_id
+        last_message = ""
+        for level in levels.get(quality, levels["320"]):
             payload = self._get_json(
-                "/api/song/enhance/player/url",
-                {"ids": json.dumps([int(song_id) if str(song_id).isdigit() else song_id]), "br": br},
+                "/api/song/enhance/player/url/v1",
+                {"ids": json.dumps([normalized_id]), "level": level, "encodeType": "mp3"},
                 cookie,
             )
             data = payload.get("data") if isinstance(payload.get("data"), list) else []
             item = data[0] if data and isinstance(data[0], dict) else {}
             url = str(item.get("url") or "")
-            if url:
+            last_message = str(item.get("message") or payload.get("message") or payload.get("msg") or last_message or "")
+            if url and self._stream_url_available(url):
                 return url
+        for br in (bitrates.get(quality, 320000), 320000, 128000):
+            payload = self._get_json(
+                "/api/song/enhance/player/url",
+                {"ids": json.dumps([normalized_id]), "br": br},
+                cookie,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), list) else []
+            item = data[0] if data and isinstance(data[0], dict) else {}
+            url = str(item.get("url") or "")
+            last_message = str(item.get("message") or payload.get("message") or payload.get("msg") or last_message or "")
+            if url and self._stream_url_available(url):
+                return url
+        if last_message:
+            raise QQMusicError(f"网易云没有返回可用播放链接：{last_message}")
         raise QQMusicError("网易云没有返回可播放链接，可能是会员、版权、地区或登录限制")
+
+    def _stream_url_available(self, url: str) -> bool:
+        headers = {
+            "User-Agent": NETEASE_WEB_UA,
+            "Referer": "https://music.163.com/",
+            "Range": "bytes=0-0",
+        }
+        for method in ("HEAD", "GET"):
+            try:
+                request = urllib.request.Request(url, method=method, headers=headers)
+                with urllib.request.urlopen(request, timeout=min(5, self.timeout)) as response:
+                    content_type = response.headers.get("Content-Type", "")
+                    if 200 <= response.status < 400 and (not content_type or "text/html" not in content_type.lower()):
+                        return True
+            except urllib.error.HTTPError as exc:
+                if method == "HEAD" and exc.code in {403, 405, 501}:
+                    continue
+                return False
+            except (urllib.error.URLError, TimeoutError, OSError):
+                return False
+        return False
 
     def lyric(self, mid: str, cookie: str = "") -> str:
         payload = self._get_json(
@@ -2114,7 +2117,7 @@ class Player:
             return False
         return True
 
-    def play(self, url: str) -> None:
+    def play(self, url: str, start_position_ms: int = 0) -> None:
         if self.backend == "python-vlc":
             self.stop()
             if not self._vlc_instance or not self._vlc_player:
@@ -2130,7 +2133,7 @@ class Player:
             return
 
         self.stop()
-        args = build_player_args(self.command, url)
+        args = build_player_args(self.command, url, start_position_ms)
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def pause(self) -> bool:
@@ -2194,14 +2197,27 @@ def find_player() -> str | None:
     return None
 
 
-def build_player_args(command: str, url: str) -> list[str]:
+def build_player_args(command: str, url: str, start_position_ms: int = 0) -> list[str]:
     name = os.path.basename(command)
+    start_seconds = max(0.0, start_position_ms / 1000)
     if name == "mpv":
-        return [command, "--force-window=yes", url]
+        args = [command, "--force-window=yes"]
+        if start_seconds:
+            args.append(f"--start={start_seconds:.3f}")
+        args.append(url)
+        return args
     if name == "vlc":
-        return [command, "--started-from-file", url]
+        args = [command, "--started-from-file"]
+        if start_seconds:
+            args.append(f"--start-time={start_seconds:.3f}")
+        args.append(url)
+        return args
     if name == "ffplay":
-        return [command, "-autoexit", "-nodisp", url]
+        args = [command, "-autoexit", "-nodisp"]
+        if start_seconds:
+            args.extend(["-ss", f"{start_seconds:.3f}"])
+        args.append(url)
+        return args
     return [command, url]
 
 
@@ -2355,6 +2371,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     style.map("Player.TButton", background=[("active", "#334155"), ("disabled", "#273244")])
 
     keyword_var = tk.StringVar()
+    platform_var = tk.StringVar(value=platform_display_name(current_platform))
     quality_var = tk.StringVar(value=str(settings.get("quality", "320")))
     status_var = tk.StringVar(value=f"平台: {platform_display_name(current_platform)} | 播放器: {player.display_name}")
     account_var = tk.StringVar()
@@ -2390,11 +2407,20 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
     entry.focus_set()
 
+    platform_box = ttk.Combobox(
+        top,
+        textvariable=platform_var,
+        values=tuple(PLATFORMS.values()),
+        width=12,
+        state="readonly",
+    )
+    platform_box.grid(row=0, column=1, padx=(0, 8))
+
     search_button = ttk.Button(top, text="搜索", style="Accent.TButton")
-    search_button.grid(row=0, column=1, padx=(0, 8))
+    search_button.grid(row=0, column=2, padx=(0, 8))
 
     settings_button = ttk.Button(top, text="设置", style="Accent.TButton")
-    settings_button.grid(row=0, column=2)
+    settings_button.grid(row=0, column=3)
 
     body = ttk.PanedWindow(root, orient=tk.HORIZONTAL)
     body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(12, 10))
@@ -2564,6 +2590,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         state = tk.DISABLED if is_busy else tk.NORMAL
         search_button.configure(state=state)
         settings_button.configure(state=state)
+        platform_box.configure(state=tk.DISABLED if is_busy else "readonly")
         write_state = state if auth.get("qq_number") and supports_playlist_write() else tk.DISABLED
         new_playlist_button.configure(state=write_state)
         rename_playlist_button.configure(state=write_state)
@@ -2607,6 +2634,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         playback_token += 1
         user_stopped = True
         current_platform = new_platform
+        platform_var.set(platform_display_name(new_platform))
         settings["platform"] = new_platform
         try:
             save_settings(settings)
@@ -2632,6 +2660,13 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         status_var.set(f"已切换到 {platform_display_name(new_platform)}")
         if auth.get("qq_number") and settings.get("auto_sync_playlists", True):
             sync_playlists()
+
+    def on_platform_selected(_event: object | None = None) -> None:
+        selected = platform_var.get()
+        selected_platform = normalize_platform(next((key for key, label in PLATFORMS.items() if label == selected), selected))
+        switch_platform(selected_platform)
+
+    platform_box.bind("<<ComboboxSelected>>", on_platform_selected)
 
     def current_duration_ms() -> int | None:
         duration = player.duration_ms()
@@ -2923,22 +2958,8 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         container = ttk.Frame(window, padding=18, style="Panel.TFrame")
         container.grid(row=0, column=0, sticky="nsew")
 
-        platform_title = ttk.Label(container, text="平台", style="Title.TLabel")
-        platform_title.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
-        platform_setting_var = tk.StringVar(value=platform_display_name(current_platform))
-        platform_box = ttk.Combobox(
-            container,
-            textvariable=platform_setting_var,
-            values=tuple(PLATFORMS.values()),
-            width=12,
-            state="readonly",
-        )
-        platform_box.grid(row=1, column=1, sticky="e", pady=(0, 12))
-        platform_label = ttk.Label(container, text="音乐平台", style="Muted.TLabel")
-        platform_label.grid(row=1, column=0, sticky="w", pady=(0, 12), padx=(0, 12))
-
         title = ttk.Label(container, text="歌曲队列显示", style="Title.TLabel")
-        title.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        title.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
 
         show_singers_var = tk.BooleanVar(value=bool(settings.get("queue_show_singers", True)))
         show_album_var = tk.BooleanVar(value=bool(settings.get("queue_show_album", True)))
@@ -2949,47 +2970,47 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         auto_sync_var = tk.BooleanVar(value=bool(settings.get("auto_sync_playlists", True)))
         download_dir_var = tk.StringVar(value=str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"])))
 
-        ttk.Checkbutton(container, text="显示歌手", variable=show_singers_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(container, text="显示专辑名", variable=show_album_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(container, text="显示歌曲时长", variable=show_duration_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(container, text="显示 MID", variable=show_mid_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示歌手", variable=show_singers_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示专辑名", variable=show_album_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示歌曲时长", variable=show_duration_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示 MID", variable=show_mid_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
 
         font_label = ttk.Label(container, text="队列字体大小", style="Muted.TLabel")
-        font_label.grid(row=7, column=0, sticky="w", pady=(12, 4), padx=(0, 12))
+        font_label.grid(row=5, column=0, sticky="w", pady=(12, 4), padx=(0, 12))
         font_size = ttk.Combobox(container, textvariable=font_size_var, values=("10", "11", "12", "13", "14"), width=8, state="readonly")
-        font_size.grid(row=7, column=1, sticky="e", pady=(12, 4))
+        font_size.grid(row=5, column=1, sticky="e", pady=(12, 4))
 
         playback_title = ttk.Label(container, text="播放和同步", style="Title.TLabel")
-        playback_title.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(18, 8))
+        playback_title.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         quality_label = ttk.Label(container, text="默认音质", style="Muted.TLabel")
-        quality_label.grid(row=9, column=0, sticky="w", pady=4, padx=(0, 12))
+        quality_label.grid(row=7, column=0, sticky="w", pady=4, padx=(0, 12))
         quality_setting = ttk.Combobox(container, textvariable=quality_setting_var, values=("128", "320", "flac"), width=8, state="readonly")
-        quality_setting.grid(row=9, column=1, sticky="e", pady=4)
-        ttk.Checkbutton(container, text="启动时自动同步歌单", variable=auto_sync_var).grid(row=10, column=0, columnspan=2, sticky="w", pady=4)
+        quality_setting.grid(row=7, column=1, sticky="e", pady=4)
+        ttk.Checkbutton(container, text="启动时自动同步歌单", variable=auto_sync_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=4)
 
         download_title = ttk.Label(container, text="下载", style="Title.TLabel")
-        download_title.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(18, 8))
+        download_title.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         download_entry = ttk.Entry(container, textvariable=download_dir_var, width=42)
-        download_entry.grid(row=12, column=0, sticky="ew", pady=4, padx=(0, 8))
+        download_entry.grid(row=10, column=0, sticky="ew", pady=4, padx=(0, 8))
 
         def choose_download_dir() -> None:
             selected = filedialog.askdirectory(parent=window, initialdir=download_dir_var.get() or str(Path.home()))
             if selected:
                 download_dir_var.set(selected)
 
-        ttk.Button(container, text="选择目录", command=choose_download_dir, style="Accent.TButton").grid(row=12, column=1, sticky="e", pady=4)
+        ttk.Button(container, text="选择目录", command=choose_download_dir, style="Accent.TButton").grid(row=10, column=1, sticky="e", pady=4)
 
         account_title = ttk.Label(container, text="账号", style="Title.TLabel")
-        account_title.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(18, 8))
+        account_title.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         account_buttons = ttk.Frame(container, style="Panel.TFrame")
-        account_buttons.grid(row=14, column=0, columnspan=2, sticky="ew")
+        account_buttons.grid(row=12, column=0, columnspan=2, sticky="ew")
         account_button_text = "退出登录" if auth.get("qq_number") else "登录"
         account_button_command = logout if auth.get("qq_number") else start_login_action
         ttk.Button(account_buttons, text=account_button_text, command=lambda: (window.destroy(), account_button_command()), style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
         ttk.Button(account_buttons, text="同步歌单", command=lambda: (window.destroy(), sync_playlists()), style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
 
         buttons = ttk.Frame(container, style="Panel.TFrame")
-        buttons.grid(row=15, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(18, 0))
 
         def apply_settings() -> None:
             settings.update(
@@ -3002,9 +3023,6 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                     "quality": quality_setting_var.get(),
                     "auto_sync_playlists": auto_sync_var.get(),
                     "download_dir": download_dir_var.get().strip() or str(DEFAULT_SETTINGS["download_dir"]),
-                    "platform": normalize_platform(
-                        next((key for key, label in PLATFORMS.items() if label == platform_setting_var.get()), platform_setting_var.get())
-                    ),
                 }
             )
             try:
@@ -3016,7 +3034,6 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             quality_var.set(str(settings.get("quality", "320")))
             refresh_song_list()
             refresh_playlist_list()
-            switch_platform(str(settings.get("platform", "qqmusic")))
             status_var.set("设置已保存")
             window.destroy()
 
@@ -3045,10 +3062,9 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             window.destroy()
             action()
 
-        ttk.Button(container, text="网易云App扫码", command=lambda: start(netease_qr_login), style="Accent.TButton").grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(container, text="手机号验证码", command=lambda: start(netease_phone_login), style="Accent.TButton").grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(container, text="导入网页登录Cookie", command=lambda: start(import_netease_cookie_login), style="Accent.TButton").grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        ttk.Button(container, text="取消", command=window.destroy, style="Accent.TButton").grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(container, text="手机号验证码", command=lambda: start(netease_phone_login), style="Accent.TButton").grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(container, text="导入网页登录Cookie", command=lambda: start(import_netease_cookie_login), style="Accent.TButton").grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(container, text="取消", command=window.destroy, style="Accent.TButton").grid(row=3, column=0, sticky="ew", pady=(4, 0))
         window.grab_set()
 
     def finish_netease_login(result: QRLoginResult, *windows: tk.Toplevel) -> None:
@@ -3061,82 +3077,6 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             if login_window.winfo_exists():
                 login_window.destroy()
         sync_playlists()
-
-    def netease_qr_login() -> None:
-        set_busy(True, "正在获取网易云扫码登录链接...")
-        qr_window: tk.Toplevel | None = None
-        cancelled = False
-
-        def close_qr() -> None:
-            nonlocal cancelled
-            cancelled = True
-            if qr_window and qr_window.winfo_exists():
-                qr_window.destroy()
-            set_busy(False, "已取消登录")
-
-        def show_qr(session: NeteaseQRLoginSession) -> None:
-            nonlocal qr_window
-            qr_window = tk.Toplevel(root)
-            qr_window.title("网易云扫码登录")
-            qr_window.geometry("560x230")
-            qr_window.transient(root)
-            qr_window.protocol("WM_DELETE_WINDOW", close_qr)
-
-            container = ttk.Frame(qr_window, padding=18, style="Panel.TFrame")
-            container.grid(row=0, column=0, sticky="nsew")
-            qr_window.columnconfigure(0, weight=1)
-            container.columnconfigure(0, weight=1)
-            ttk.Label(container, text="使用网易云音乐 App 扫码登录", style="Title.TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 10))
-            ttk.Label(container, text="已打开官方登录页。如果浏览器没有弹出，复制下面链接到浏览器，再用网易云音乐 App 扫码确认。", wraplength=520, style="Muted.TLabel").grid(row=1, column=0, sticky="ew")
-            url_entry = tk.Entry(container, borderwidth=1, relief=tk.SOLID)
-            url_entry.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-            url_entry.insert(0, session.url)
-            url_entry.selection_range(0, tk.END)
-
-            def copy_url() -> None:
-                root.clipboard_clear()
-                root.clipboard_append(session.url)
-                status_var.set("扫码登录链接已复制")
-
-            buttons = ttk.Frame(container, style="Panel.TFrame")
-            buttons.grid(row=3, column=0, sticky="e", pady=(14, 0))
-            ttk.Button(buttons, text="复制链接", command=copy_url, style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
-            ttk.Button(buttons, text="打开链接", command=lambda: webbrowser.open(session.url), style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
-            ttk.Button(buttons, text="取消", command=close_qr, style="Accent.TButton").grid(row=0, column=2)
-            status_var.set("等待网易云 App 扫码...")
-            webbrowser.open(session.url)
-
-        def worker() -> None:
-            try:
-                session = api.start_qr_login()
-            except Exception as exc:  # noqa: BLE001
-                message = str(exc)
-                root.after(0, lambda: (set_busy(False, "获取扫码链接失败"), messagebox.showerror("登录失败", message)))
-                return
-            root.after(0, lambda: show_qr(session))
-            deadline = time.time() + 180
-            while time.time() < deadline and not cancelled:
-                try:
-                    state, result = api.poll_qr_login(session)
-                except Exception as exc:  # noqa: BLE001
-                    message = str(exc)
-                    root.after(0, lambda: (set_busy(False, "登录失败"), messagebox.showerror("登录失败", message)))
-                    return
-                if state == "waiting":
-                    root.after(0, lambda: status_var.set("等待网易云 App 扫码..."))
-                elif state == "confirming":
-                    root.after(0, lambda: status_var.set("已扫码，等待手机确认..."))
-                elif state == "expired":
-                    root.after(0, lambda: (set_busy(False, "二维码已过期"), messagebox.showinfo("登录", "二维码已过期，请重新登录")))
-                    return
-                elif state == "done" and result:
-                    root.after(0, lambda: finish_netease_login(result, qr_window) if qr_window else finish_netease_login(result))
-                    return
-                time.sleep(2)
-            if not cancelled:
-                root.after(0, lambda: (set_busy(False, "登录超时"), messagebox.showinfo("登录", "登录超时，请重新登录")))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def import_netease_cookie_login() -> None:
         cookie_window = tk.Toplevel(root)
@@ -4006,16 +3946,17 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         def worker() -> None:
             try:
                 url = song.local_path or api.song_url(song.mid, quality_var.get(), auth.get("cookie", ""), song.media_mid)
-                player.play(url)
-                if paused_position_ms:
-                    player.seek_ms(paused_position_ms)
+                start_position = paused_position_ms
+                player.play(url, start_position)
+                if start_position:
+                    player.seek_ms(start_position)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 root.after(0, lambda: (set_busy(False, "播放失败"), messagebox.showerror("播放失败", message)))
                 return
             def update_started() -> None:
                 nonlocal playback_started_at
-                playback_started_at = time.monotonic() - (paused_position_ms / 1000)
+                playback_started_at = time.monotonic() - (start_position / 1000)
                 set_busy(False)
                 player_meta_var.set(song.singers or song.album or "正在播放")
                 threading.Thread(target=monitor_playback, args=(play_token,), daemon=True).start()
@@ -4035,6 +3976,15 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             play_song_at(index, paused_position_ms)
             return
         play_song_at(index)
+
+    def resume_paused_song() -> None:
+        if not (user_stopped and paused_position_ms and 0 <= current_song_index < len(songs)):
+            play_selected()
+            return
+        if player.resume():
+            nonlocal_update_resume()
+            return
+        play_song_at(current_song_index, paused_position_ms)
 
     def nonlocal_update_resume() -> None:
         nonlocal playback_token, user_stopped, playback_started_at
@@ -4080,7 +4030,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
     def toggle_pause_resume() -> None:
         if user_stopped and paused_position_ms:
-            play_selected()
+            resume_paused_song()
             return
         stop()
 

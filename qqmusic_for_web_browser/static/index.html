@@ -40,6 +40,10 @@
         <header class="topbar">
           <div class="search-wrap">
             <input id="searchInput" type="search" autocomplete="off" placeholder="搜索歌曲、歌手、专辑" />
+            <select id="platformSelect" aria-label="音乐平台">
+              <option value="qqmusic">QQ 音乐</option>
+              <option value="netease">网易云音乐</option>
+            </select>
             <button id="searchButton" class="primary">搜索</button>
           </div>
           <div class="quality-wrap">
@@ -125,13 +129,28 @@
     <div id="loginModal" class="modal hidden">
       <div class="modal-panel">
         <button class="modal-close" data-close="loginModal">×</button>
-        <h2>登录 QQ 音乐</h2>
+        <h2 id="loginTitle">登录 QQ 音乐</h2>
+        <div id="qqLoginPanel">
         <div class="login-tabs">
           <button data-provider="qq" class="active">QQ 登录</button>
           <button data-provider="wechat">微信登录</button>
         </div>
         <div class="qr-box">
           <img id="qrImage" alt="登录二维码" />
+        </div>
+        </div>
+        <div id="neteaseLoginPanel" class="netease-login hidden">
+          <div class="phone-row">
+            <input id="neteaseCountryCode" value="86" aria-label="区号" />
+            <input id="neteasePhone" placeholder="手机号" autocomplete="tel" />
+            <button id="sendNeteaseCaptcha">发送验证码</button>
+          </div>
+          <div class="phone-row">
+            <input id="neteaseCaptcha" placeholder="验证码" autocomplete="one-time-code" />
+            <button id="loginNeteasePhone" class="primary">手机号登录</button>
+          </div>
+          <textarea id="neteaseCookie" placeholder="粘贴网易云网页版 Cookie"></textarea>
+          <button id="loginNeteaseCookie">导入 Cookie 登录</button>
         </div>
         <p id="loginStatus">请选择登录方式</p>
       </div>

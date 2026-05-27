@@ -4,14 +4,31 @@ struct LocalSettings: Codable {
     var baseURL: String
     var quality: String
     var initialPageSize: Int
+    var platform: String
+
+    init(baseURL: String, quality: String, initialPageSize: Int, platform: String) {
+        self.baseURL = baseURL
+        self.quality = quality
+        self.initialPageSize = initialPageSize
+        self.platform = platform
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? "http://127.0.0.1:8765"
+        quality = try container.decodeIfPresent(String.self, forKey: .quality) ?? "320"
+        initialPageSize = try container.decodeIfPresent(Int.self, forKey: .initialPageSize) ?? 50
+        platform = try container.decodeIfPresent(String.self, forKey: .platform) ?? "qqmusic"
+    }
 
     enum CodingKeys: String, CodingKey {
         case baseURL = "base_url"
         case quality
         case initialPageSize = "initial_page_size"
+        case platform
     }
 
-    static let fallback = LocalSettings(baseURL: "http://127.0.0.1:8765", quality: "320", initialPageSize: 50)
+    static let fallback = LocalSettings(baseURL: "http://127.0.0.1:8765", quality: "320", initialPageSize: 50, platform: "qqmusic")
 }
 
 struct LocalAuth: Codable {

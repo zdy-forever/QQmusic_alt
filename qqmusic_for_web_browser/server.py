@@ -31,6 +31,7 @@ PC_DIR = REPO_ROOT / "qqmusic_for_pc"
 STATIC_DIR = ROOT / "static"
 
 os.environ["QQMUSIC_AUTH_FILE"] = str(ROOT / ".qqmusic_auth.json")
+os.environ["NETEASE_AUTH_FILE"] = str(ROOT / ".netease_auth.json")
 os.environ["QQMUSIC_SETTINGS_FILE"] = str(ROOT / ".qqmusic_settings.json")
 
 sys.path.insert(0, str(PC_DIR))
@@ -41,11 +42,19 @@ from qqmusic_client import (  # noqa: E402
     QQMusicError,
     QRLoginSession,
     WXLoginSession,
+    build_music_api,
     clear_auth,
     format_seconds,
+    is_addable_playlist,
+    is_builtin_playlist,
+    is_netease_addable_playlist,
+    is_netease_editable_playlist,
+    is_netease_song_removable_playlist,
     load_auth,
+    normalize_platform,
     normalize_song,
     parse_lrc_lines,
+    platform_display_name,
     save_auth,
 )
 
@@ -55,6 +64,7 @@ WEB_DEFAULT_SETTINGS: dict[str, Any] = {
     "initial_page_size": 50,
     "background_page_size": 500,
     "auto_sync_playlists": True,
+    "platform": "qqmusic",
 }
 
 
@@ -94,12 +104,14 @@ def normalize_web_settings(settings: dict[str, Any]) -> dict[str, Any]:
     play_mode = str(settings.get("play_mode") or "顺序播放")
     if play_mode not in {"顺序播放", "随机播放", "单曲循环"}:
         play_mode = "顺序播放"
+    platform = normalize_platform(str(settings.get("platform") or "qqmusic"))
     return {
         "quality": quality,
         "play_mode": play_mode,
         "initial_page_size": bounded_int("initial_page_size", 50, 1, 500),
         "background_page_size": bounded_int("background_page_size", 500, 50, 1000),
         "auto_sync_playlists": bool(settings.get("auto_sync_playlists", True)),
+        "platform": platform,
     }
 
 
@@ -112,9 +124,23 @@ def save_web_settings(settings: dict[str, Any]) -> dict[str, Any]:
     return current
 
 
-api = QQMusicAPI(timeout=int(os.environ.get("QQMUSIC_TIMEOUT", DEFAULT_TIMEOUT)))
+api_base = os.environ.get("QQMUSIC_API_BASE", "https://api.ygking.top")
+api_timeout = int(os.environ.get("QQMUSIC_TIMEOUT", DEFAULT_TIMEOUT))
+qq_api = QQMusicAPI(timeout=api_timeout)
 login_sessions: dict[str, tuple[str, QRLoginSession | WXLoginSession]] = {}
 login_lock = threading.Lock()
+
+
+def current_platform() -> str:
+    return normalize_platform(str(load_web_settings().get("platform", "qqmusic")))
+
+
+def current_api() -> Any:
+    return build_music_api(current_platform(), api_base, api_timeout)
+
+
+def current_auth() -> dict[str, str]:
+    return load_auth(current_platform())
 
 
 def json_bytes(payload: Any) -> bytes:
@@ -125,7 +151,10 @@ def song_to_dict(song: Any) -> dict[str, Any]:
     raw = song.raw if isinstance(getattr(song, "raw", None), dict) else {}
     album = raw.get("album") if isinstance(raw.get("album"), dict) else {}
     album_mid = str(album.get("mid") or album.get("pmid") or "")
+    netease_album = raw.get("al") or raw.get("album")
+    netease_cover = netease_album.get("picUrl") if isinstance(netease_album, dict) else ""
     cover = f"https://y.qq.com/music/photo_new/T002R300x300M000{album_mid}.jpg?max_age=2592000" if album_mid else ""
+    cover = cover or str(netease_cover or "")
     return {
         "title": song.title,
         "mid": song.mid,
@@ -147,6 +176,16 @@ def playlist_to_dict(playlist: Any) -> dict[str, Any]:
         cover = f"https:{cover}"
     elif cover and not cover.startswith(("http://", "https://")):
         cover = ""
+    platform = current_platform()
+    account = load_auth(platform).get("qq_number", "")
+    if platform == "netease":
+        editable = is_netease_editable_playlist(playlist, account)
+        addable = is_netease_addable_playlist(playlist, account)
+        removable = is_netease_song_removable_playlist(playlist, account)
+    else:
+        editable = not is_builtin_playlist(playlist)
+        addable = is_addable_playlist(playlist)
+        removable = editable
     return {
         "id": playlist.id,
         "name": playlist.name,
@@ -154,19 +193,22 @@ def playlist_to_dict(playlist: Any) -> dict[str, Any]:
         "song_count": playlist.song_count,
         "cover": cover,
         "display": playlist.display,
-        "builtin": playlist.id == "__downloads__" or playlist.dirid == "201" or playlist.name == "我喜欢",
+        "builtin": not editable,
+        "editable": editable,
+        "addable": addable,
+        "removable": removable,
     }
 
 
 def require_cookie() -> str:
-    cookie = load_auth().get("cookie", "")
+    cookie = current_auth().get("cookie", "")
     if not cookie:
         raise QQMusicError("请先登录")
     return cookie
 
 
 def require_account() -> tuple[str, str]:
-    auth = load_auth()
+    auth = current_auth()
     qq_number = auth.get("qq_number", "")
     cookie = auth.get("cookie", "")
     if not qq_number or not cookie:
@@ -264,8 +306,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def handle_api_get(self, path: str, query: dict[str, list[str]]) -> None:
         if path == "/api/state":
-            auth = load_auth()
-            self.send_json({"ok": True, "logged_in": bool(auth.get("qq_number")), "account": auth.get("qq_number", "")})
+            platform = current_platform()
+            auth = load_auth(platform)
+            self.send_json(
+                {
+                    "ok": True,
+                    "logged_in": bool(auth.get("qq_number")),
+                    "account": auth.get("qq_number", ""),
+                    "platform": platform,
+                    "platform_name": platform_display_name(platform),
+                }
+            )
             return
 
         if path == "/api/settings":
@@ -275,6 +326,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "settings": load_web_settings(),
                     "files": {
                         "auth": str(Path(os.environ["QQMUSIC_AUTH_FILE"])),
+                        "netease_auth": str(Path(os.environ["NETEASE_AUTH_FILE"])),
                         "settings": str(settings_path()),
                     },
                 }
@@ -288,9 +340,9 @@ class Handler(SimpleHTTPRequestHandler):
             if not entry:
                 raise QQMusicError("登录会话不存在或已过期")
             provider, session = entry
-            state, result = api.poll_wx_qr_login(session) if provider == "wechat" else api.poll_qr_login(session)
+            state, result = qq_api.poll_wx_qr_login(session) if provider == "wechat" else qq_api.poll_qr_login(session)
             if result:
-                save_auth(result.qq_number, result.cookie)
+                save_auth(result.qq_number, result.cookie, "qqmusic")
                 with login_lock:
                     login_sessions.pop(session_id, None)
                 self.send_json({"ok": True, "state": "done", "account": result.qq_number, "nickname": result.nickname})
@@ -299,12 +351,14 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/playlists":
+            api = current_api()
             qq_number, cookie = require_account()
             playlists = [playlist_to_dict(item) for item in api.user_playlists(qq_number, cookie)]
             self.send_json({"ok": True, "playlists": playlists})
             return
 
         if path.startswith("/api/playlists/") and path.endswith("/songs"):
+            api = current_api()
             playlist_id = path.removeprefix("/api/playlists/").removesuffix("/songs").strip("/")
             cookie = require_cookie()
             begin = int(self.first_query(query, "begin", "0") or "0")
@@ -314,6 +368,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/search":
+            api = current_api()
             cookie = require_cookie()
             keyword = self.first_query(query, "q").strip()
             if not keyword:
@@ -324,6 +379,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/song-url":
+            api = current_api()
             cookie = require_cookie()
             mid = self.first_query(query, "mid")
             quality = self.first_query(query, "quality", "320")
@@ -333,7 +389,8 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/lyric":
-            cookie = load_auth().get("cookie", "")
+            api = current_api()
+            cookie = current_auth().get("cookie", "")
             mid = self.first_query(query, "mid")
             text = api.lyric(mid, cookie)
             lines = [{"time_ms": time_ms, "text": lyric} for time_ms, lyric in parse_lrc_lines(text)]
@@ -348,10 +405,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def handle_api_write(self, method: str, path: str, payload: dict[str, Any]) -> None:
         if path == "/api/login/start" and method == "POST":
+            if current_platform() != "qqmusic":
+                raise QQMusicError("网易云音乐已取消扫码登录，请使用手机号验证码或 Cookie 登录")
             provider = str(payload.get("provider") or "qq")
             if provider not in {"qq", "wechat"}:
                 raise QQMusicError("登录方式无效")
-            session = api.start_wx_qr_login() if provider == "wechat" else api.start_qr_login()
+            session = qq_api.start_wx_qr_login() if provider == "wechat" else qq_api.start_qr_login()
             session_id = uuid.uuid4().hex
             with login_lock:
                 login_sessions[session_id] = (provider, session)
@@ -360,7 +419,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/logout" and method == "POST":
-            clear_auth()
+            clear_auth(current_platform())
             self.send_json({"ok": True})
             return
 
@@ -368,7 +427,38 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_json({"ok": True, "settings": save_web_settings(payload)})
             return
 
+        if path == "/api/netease/captcha/send" and method == "POST":
+            phone = str(payload.get("phone") or "").strip()
+            country_code = str(payload.get("country_code") or "86").strip() or "86"
+            if not phone:
+                raise QQMusicError("手机号不能为空")
+            build_music_api("netease", api_base, api_timeout).send_phone_captcha(phone, country_code)
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/netease/login/phone" and method == "POST":
+            phone = str(payload.get("phone") or "").strip()
+            captcha = str(payload.get("captcha") or "").strip()
+            country_code = str(payload.get("country_code") or "86").strip() or "86"
+            if not phone or not captcha:
+                raise QQMusicError("手机号和验证码不能为空")
+            api = build_music_api("netease", api_base, api_timeout)
+            result = api.login_with_phone_captcha(phone, captcha, country_code)
+            save_auth(result.qq_number, result.cookie, "netease")
+            self.send_json({"ok": True, "account": result.qq_number, "nickname": result.nickname})
+            return
+
+        if path == "/api/netease/login/cookie" and method == "POST":
+            cookie = str(payload.get("cookie") or "").strip()
+            if not cookie:
+                raise QQMusicError("Cookie 不能为空")
+            result = build_music_api("netease", api_base, api_timeout).login_with_cookie(cookie)
+            save_auth(result.qq_number, result.cookie, "netease")
+            self.send_json({"ok": True, "account": result.qq_number, "nickname": result.nickname})
+            return
+
         if path == "/api/playlists" and method == "POST":
+            api = current_api()
             cookie = require_cookie()
             name = str(payload.get("name") or "").strip()
             if not name:
@@ -381,6 +471,7 @@ class Handler(SimpleHTTPRequestHandler):
             parts = path.strip("/").split("/")
             if len(parts) >= 3:
                 playlist_id = parts[2]
+                api = current_api()
                 cookie = require_cookie()
                 if len(parts) == 3 and method == "PUT":
                     name = str(payload.get("name") or "").strip()
@@ -418,6 +509,7 @@ class Handler(SimpleHTTPRequestHandler):
         raise QQMusicError(f"未知接口: {method} {path}")
 
     def stream_download(self, query: dict[str, list[str]]) -> None:
+        api = current_api()
         cookie = require_cookie()
         mid = self.first_query(query, "mid")
         quality = self.first_query(query, "quality", "320")
@@ -426,7 +518,7 @@ class Handler(SimpleHTTPRequestHandler):
         url = api.song_url(mid, quality, cookie, media_mid)
         extension = ".flac" if quality == "flac" else ".mp3"
         request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://y.qq.com/"})
-        with urllib.request.urlopen(request, timeout=api.timeout) as response:
+        with urllib.request.urlopen(request, timeout=api_timeout) as response:
             self.send_response(200)
             self.send_header("Content-Type", response.headers.get("Content-Type", "audio/mpeg"))
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(title + extension)}")
