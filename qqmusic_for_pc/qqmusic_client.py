@@ -2133,6 +2133,19 @@ class Player:
         args = build_player_args(self.command, url)
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def pause(self) -> bool:
+        if self.backend == "python-vlc" and self._vlc_player is not None:
+            self._vlc_player.pause()
+            return True
+        self.stop()
+        return False
+
+    def resume(self) -> bool:
+        if self.backend == "python-vlc" and self._vlc_player is not None:
+            self._vlc_player.play()
+            return True
+        return False
+
     def stop(self) -> None:
         if self._vlc_player is not None:
             self._vlc_player.stop()
@@ -2363,6 +2376,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     playlist_load_token = 0
     user_stopped = True
     playback_started_at = 0.0
+    paused_position_ms = 0
     progress_dragging = False
 
     root.columnconfigure(0, weight=1)
@@ -2495,7 +2509,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     prev_button.grid(row=0, column=0, padx=(0, 6))
     player_play_button = ttk.Button(control_group, text="播放", style="Player.TButton")
     player_play_button.grid(row=0, column=1, padx=(0, 6))
-    player_stop_button = ttk.Button(control_group, text="停止", style="Player.TButton")
+    player_stop_button = ttk.Button(control_group, text="暂停", style="Player.TButton")
     player_stop_button.grid(row=0, column=2, padx=(0, 6))
     next_button = ttk.Button(control_group, text="下一首", style="Player.TButton")
     next_button.grid(row=0, column=3)
@@ -2631,7 +2645,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
     def current_position_ms() -> int | None:
         if user_stopped:
-            return 0
+            return paused_position_ms
         position = player.position_ms()
         if position is None and playback_started_at:
             position = int((time.monotonic() - playback_started_at) * 1000)
@@ -2669,11 +2683,12 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         progress_text_var.set(format_milliseconds(position))
 
     def finish_progress_drag(_event: object) -> None:
-        nonlocal playback_started_at, progress_dragging
+        nonlocal playback_started_at, paused_position_ms, progress_dragging
         position = progress_value_to_ms()
         progress_dragging = False
         if position is None:
             return
+        paused_position_ms = position
         if player.seek_ms(position):
             playback_started_at = time.monotonic() - (position / 1000)
             progress_text_var.set(format_milliseconds(position))
@@ -3961,8 +3976,8 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             return
         play_song_at(next_index)
 
-    def play_song_at(index: int) -> None:
-        nonlocal current_song_index, playback_token, user_stopped, playback_started_at
+    def play_song_at(index: int, start_position_ms: int = 0) -> None:
+        nonlocal current_song_index, playback_token, user_stopped, playback_started_at, paused_position_ms
         if not (0 <= index < len(songs)):
             messagebox.showinfo("提示", "先选择一首歌")
             return
@@ -3973,6 +3988,8 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         playback_token += 1
         play_token = playback_token
         user_stopped = False
+        paused_position_ms = max(0, int(start_position_ms))
+        player_stop_button.configure(text="暂停")
         current_song_index = index
         listbox.selection_clear(0, tk.END)
         listbox.selection_set(index)
@@ -3982,7 +3999,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         player_meta_var.set(song.singers or song.album or "正在获取播放链接")
         queue_var.set(f"{index + 1} / {len(songs)}")
         progress_var.set(0.0)
-        progress_text_var.set("0:00")
+        progress_text_var.set(format_milliseconds(paused_position_ms))
         duration_text_var.set(format_milliseconds(song.duration * 1000 if song.duration else None))
         set_busy(True, "正在获取播放链接...")
 
@@ -3990,13 +4007,15 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             try:
                 url = song.local_path or api.song_url(song.mid, quality_var.get(), auth.get("cookie", ""), song.media_mid)
                 player.play(url)
+                if paused_position_ms:
+                    player.seek_ms(paused_position_ms)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 root.after(0, lambda: (set_busy(False, "播放失败"), messagebox.showerror("播放失败", message)))
                 return
             def update_started() -> None:
                 nonlocal playback_started_at
-                playback_started_at = time.monotonic()
+                playback_started_at = time.monotonic() - (paused_position_ms / 1000)
                 set_busy(False)
                 player_meta_var.set(song.singers or song.album or "正在播放")
                 threading.Thread(target=monitor_playback, args=(play_token,), daemon=True).start()
@@ -4009,7 +4028,24 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         index = selected_song_index()
         if index < 0 and songs:
             index = current_song_index if current_song_index >= 0 else 0
+        if user_stopped and index == current_song_index and paused_position_ms:
+            if player.resume():
+                nonlocal_update_resume()
+                return
+            play_song_at(index, paused_position_ms)
+            return
         play_song_at(index)
+
+    def nonlocal_update_resume() -> None:
+        nonlocal playback_token, user_stopped, playback_started_at
+        playback_token += 1
+        token = playback_token
+        user_stopped = False
+        playback_started_at = time.monotonic() - (paused_position_ms / 1000)
+        player_meta_var.set("继续播放")
+        player_stop_button.configure(text="暂停")
+        status_var.set("继续播放")
+        threading.Thread(target=monitor_playback, args=(token,), daemon=True).start()
 
     def play_previous() -> None:
         if not songs:
@@ -4026,15 +4062,27 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             play_song_at(next_index)
 
     def stop() -> None:
-        nonlocal playback_token, user_stopped, playback_started_at
+        nonlocal playback_token, user_stopped, playback_started_at, paused_position_ms
         playback_token += 1
+        position = current_position_ms()
+        if position is not None:
+            paused_position_ms = position
         user_stopped = True
         playback_started_at = 0.0
-        player.stop()
-        player_meta_var.set("已停止")
-        progress_var.set(0.0)
-        progress_text_var.set("0:00")
-        status_var.set("已停止")
+        player.pause()
+        player_meta_var.set("已暂停")
+        player_stop_button.configure(text="继续播放")
+        progress_text_var.set(format_milliseconds(paused_position_ms))
+        duration = current_duration_ms()
+        if duration:
+            progress_var.set(max(0.0, min(100.0, paused_position_ms * 100 / duration)))
+        status_var.set("已暂停")
+
+    def toggle_pause_resume() -> None:
+        if user_stopped and paused_position_ms:
+            play_selected()
+            return
+        stop()
 
     def on_select(_event: object) -> None:
         song = selected_song()
@@ -4051,7 +4099,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     download_song_button.configure(command=download_song_action)
     prev_button.configure(command=play_previous)
     player_play_button.configure(command=play_selected)
-    player_stop_button.configure(command=stop)
+    player_stop_button.configure(command=toggle_pause_resume)
     next_button.configure(command=play_next)
     entry.bind("<Return>", lambda _event: search())
     playlist_box.bind("<Double-Button-1>", lambda _event: load_playlist())
