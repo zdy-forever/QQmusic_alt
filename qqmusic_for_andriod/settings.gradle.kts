@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "QQMusicAndroid"
+rootProject.name = "MusicAndroid"
 include(":app")

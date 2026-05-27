@@ -9,7 +9,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="QQ Music"
+        android:label="Music"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
         <activity

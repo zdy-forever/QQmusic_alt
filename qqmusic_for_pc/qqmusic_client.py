@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small QQ Music client for Linux.
+"""Small Music client for Linux.
 
 This client uses metadata and playback-link APIs. It does not try to bypass
 paid, region-locked, DRM-protected, or account-only content.
@@ -35,6 +35,7 @@ DEFAULT_API_BASE = "https://api.ygking.top"
 DEFAULT_TIMEOUT = 15
 DEFAULT_AUTH_FILE = Path(__file__).with_name(".qqmusic_auth.json")
 DEFAULT_NETEASE_AUTH_FILE = Path(__file__).with_name(".netease_auth.json")
+DEFAULT_APPLE_MUSIC_AUTH_FILE = Path(__file__).with_name(".applemusic_auth.json")
 DEFAULT_SETTINGS_FILE = Path(__file__).with_name(".qqmusic_settings.json")
 PLAYLIST_INITIAL_PAGE_SIZE = 50
 PLAYLIST_BACKGROUND_PAGE_SIZE = 500
@@ -59,9 +60,11 @@ NETEASE_WEB_UA = (
     "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
 )
 NETEASE_DEVICE_XOR_KEY = "3go8&$8*3*3h0k(2)2"
+APPLE_ITUNES_BASE_URL = "https://itunes.apple.com"
 PLATFORMS = {
     "qqmusic": "QQ 音乐",
     "netease": "网易云音乐",
+    "applemusic": "Apple Music",
 }
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -74,7 +77,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "quality": "320",
     "play_mode": "顺序播放",
     "auto_sync_playlists": True,
-    "download_dir": str(Path.home() / "音乐" / "QQMusic"),
+    "download_dir": str(Path.home() / "音乐" / "Music"),
 }
 
 
@@ -345,7 +348,7 @@ class QQMusicAPI:
             url,
             headers={
                 "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 qqmusic-linux-client/1.0",
+                "User-Agent": "Mozilla/5.0 music-linux-client/1.0",
             },
         )
 
@@ -385,7 +388,7 @@ class QQMusicAPI:
             headers={
                 "Accept": "application/json",
                 "Referer": "https://y.qq.com/portal/profile.html",
-                "User-Agent": "Mozilla/5.0 qqmusic-linux-client/1.0",
+                "User-Agent": "Mozilla/5.0 music-linux-client/1.0",
                 **(headers or {}),
             },
         )
@@ -425,7 +428,7 @@ class QQMusicAPI:
             method=method,
             headers={
                 "Accept": "*/*",
-                "User-Agent": "Mozilla/5.0 qqmusic-linux-client/1.0",
+                "User-Agent": "Mozilla/5.0 music-linux-client/1.0",
                 **(headers or {}),
             },
         )
@@ -1744,6 +1747,104 @@ class NeteaseMusicAPI:
         )
 
 
+class AppleMusicAPI:
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT, country: str | None = None):
+        self.timeout = timeout
+        self.country = (country or os.environ.get("APPLE_MUSIC_COUNTRY") or "CN").upper()
+
+    def _get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = {key: value for key, value in (params or {}).items() if value is not None}
+        url = f"{APPLE_ITUNES_BASE_URL}{path}"
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 music-linux-client/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read()
+        except urllib.error.HTTPError as exc:
+            raise QQMusicError(f"Apple Music HTTP {exc.code}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise QQMusicError(f"Apple Music 网络请求失败: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise QQMusicError("Apple Music 网络请求超时") from exc
+        payload = parse_json_like_response(body)
+        if not isinstance(payload, dict):
+            raise QQMusicError("Apple Music 接口返回格式异常")
+        return payload
+
+    def search(self, keyword: str, count: int = 30, page: int = 1, cookie: str = "") -> list[Song]:
+        _ = cookie
+        offset = max(0, page - 1) * count
+        payload = self._get_json(
+            "/search",
+            {
+                "term": keyword,
+                "media": "music",
+                "entity": "song",
+                "limit": count,
+                "offset": offset,
+                "country": self.country,
+                "lang": "zh_cn",
+            },
+        )
+        items = payload.get("results") if isinstance(payload.get("results"), list) else []
+        return [normalize_apple_music_song(item) for item in items if isinstance(item, dict) and item.get("wrapperType") == "track"]
+
+    def song_url(self, mid: str, quality: str = "320", cookie: str = "", media_mid: str = "") -> str:
+        _ = quality, cookie
+        if media_mid.startswith(("http://", "https://")):
+            return media_mid
+        payload = self._get_json("/lookup", {"id": mid, "country": self.country})
+        items = payload.get("results") if isinstance(payload.get("results"), list) else []
+        item = items[0] if items and isinstance(items[0], dict) else {}
+        url = str(item.get("previewUrl") or "")
+        if not url:
+            raise QQMusicError("Apple Music 没有返回试听链接；完整播放需要 MusicKit 授权")
+        return url
+
+    def lyric(self, mid: str, cookie: str = "") -> str:
+        _ = mid, cookie
+        return "Apple Music 公开试听接口不提供歌词。"
+
+    def playlist_songs_page(
+        self,
+        playlist_id: str,
+        cookie: str = "",
+        begin: int = 0,
+        count: int = PLAYLIST_BACKGROUND_PAGE_SIZE,
+    ) -> tuple[str, list[Song], int]:
+        _ = playlist_id, cookie, begin, count
+        raise QQMusicError("Apple Music 公开试听模式不支持读取用户歌单")
+
+    def playlist_songs(self, playlist_id: str, cookie: str = "") -> tuple[str, list[Song]]:
+        return self.playlist_songs_page(playlist_id, cookie, 0, PLAYLIST_BACKGROUND_PAGE_SIZE)[:2]
+
+    def user_playlists(self, user_id: str, cookie: str = "") -> list[Playlist]:
+        _ = user_id, cookie
+        return []
+
+    def add_song_to_playlist(self, *_args: Any, **_kwargs: Any) -> None:
+        raise QQMusicError("Apple Music 公开试听模式不支持加入歌单")
+
+    def remove_song_from_playlist(self, *_args: Any, **_kwargs: Any) -> None:
+        raise QQMusicError("Apple Music 公开试听模式不支持移除歌曲")
+
+    def create_playlist(self, *_args: Any, **_kwargs: Any) -> str:
+        raise QQMusicError("Apple Music 公开试听模式不支持创建歌单")
+
+    def delete_playlist(self, *_args: Any, **_kwargs: Any) -> None:
+        raise QQMusicError("Apple Music 公开试听模式不支持删除歌单")
+
+    def rename_playlist(self, *_args: Any, **_kwargs: Any) -> None:
+        raise QQMusicError("Apple Music 公开试听模式不支持重命名歌单")
+
+
 def normalize_song(item: dict[str, Any]) -> Song:
     title = str(item.get("title") or item.get("songname") or item.get("name") or "未知歌曲")
     mid = str(item.get("mid") or item.get("songmid") or item.get("strMediaMid") or "")
@@ -1861,10 +1962,34 @@ def normalize_netease_playlist(item: dict[str, Any]) -> Playlist:
     return Playlist(id=playlist_id, name=name, dirid=playlist_id, song_count=song_count, cover=cover, raw=item)
 
 
+def normalize_apple_music_song(item: dict[str, Any]) -> Song:
+    track_id = str(item.get("trackId") or "")
+    title = str(item.get("trackName") or item.get("collectionName") or "未知歌曲")
+    singers = str(item.get("artistName") or "")
+    album = str(item.get("collectionName") or "")
+    duration_value = item.get("trackTimeMillis")
+    try:
+        duration = int(duration_value) // 1000 if duration_value is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    return Song(
+        title=title,
+        mid=track_id,
+        song_id=track_id,
+        singers=singers,
+        album=album,
+        duration=duration,
+        media_mid=str(item.get("previewUrl") or ""),
+        raw=item,
+    )
+
+
 def auth_file_path(platform: str | None = None) -> Path:
     platform = normalize_platform(platform or load_settings().get("platform", "qqmusic"))
     if platform == "netease":
         return Path(os.environ.get("NETEASE_AUTH_FILE", DEFAULT_NETEASE_AUTH_FILE))
+    if platform == "applemusic":
+        return Path(os.environ.get("APPLE_MUSIC_AUTH_FILE", DEFAULT_APPLE_MUSIC_AUTH_FILE))
     return Path(os.environ.get("QQMUSIC_AUTH_FILE", DEFAULT_AUTH_FILE))
 
 
@@ -2222,8 +2347,11 @@ def build_player_args(command: str, url: str, start_position_ms: int = 0) -> lis
 
 
 def build_music_api(platform: str, api_base: str = DEFAULT_API_BASE, timeout: int = DEFAULT_TIMEOUT) -> Any:
-    if normalize_platform(platform) == "netease":
+    normalized = normalize_platform(platform)
+    if normalized == "netease":
         return NeteaseMusicAPI(timeout=timeout)
+    if normalized == "applemusic":
+        return AppleMusicAPI(timeout=timeout)
     return QQMusicAPI(base_url=api_base, timeout=timeout)
 
 
@@ -2232,6 +2360,9 @@ def run_cli(args: argparse.Namespace) -> int:
     api = build_music_api(platform, args.api_base, args.timeout)
 
     if args.command == "login":
+        if platform == "applemusic":
+            print("Apple Music 当前使用公开试听模式，无需登录；完整播放和用户歌单需要 MusicKit 授权。")
+            return 0
         if platform == "netease":
             if args.send_captcha:
                 if not args.phone:
@@ -2255,7 +2386,7 @@ def run_cli(args: argparse.Namespace) -> int:
             return 0
 
         session = api.start_qr_login()
-        qr_path = Path.cwd() / "qqmusic_login_qr.png"
+        qr_path = Path.cwd() / "music_login_qr.png"
         qr_path.write_bytes(session.image)
         print(f"请用手机 QQ 扫描二维码: {qr_path}", flush=True)
         print("扫码后在手机上确认登录，程序会自动继续。", flush=True)
@@ -2282,6 +2413,9 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "sync-playlists":
+        if platform == "applemusic":
+            print("Apple Music 公开试听模式不支持同步用户歌单。")
+            return 0
         auth = load_auth(platform)
         qq_number = args.qq_number or auth.get("qq_number", "")
         if not qq_number:
@@ -2597,7 +2731,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         delete_playlist_button.configure(state=write_state)
         add_song_button.configure(state=write_state)
         remove_song_button.configure(state=state)
-        download_song_button.configure(state=state)
+        download_song_button.configure(state=tk.DISABLED if current_platform == "applemusic" else state)
         if message:
             status_var.set(message)
 
@@ -2607,6 +2741,8 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     def playlist_can_write(playlist: Playlist | None) -> bool:
         if not playlist:
             return False
+        if current_platform == "applemusic":
+            return False
         if current_platform == "netease":
             return is_netease_editable_playlist(playlist, auth.get("qq_number", ""))
         return not is_builtin_playlist(playlist)
@@ -2614,12 +2750,16 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     def playlist_can_add(playlist: Playlist | None) -> bool:
         if not playlist:
             return False
+        if current_platform == "applemusic":
+            return False
         if current_platform == "netease":
             return is_netease_addable_playlist(playlist, auth.get("qq_number", ""))
         return is_addable_playlist(playlist)
 
     def playlist_can_remove_song(playlist: Playlist | None) -> bool:
         if not playlist:
+            return False
+        if current_platform == "applemusic":
             return False
         if current_platform == "netease":
             return is_netease_song_removable_playlist(playlist, auth.get("qq_number", ""))
@@ -2775,6 +2915,15 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                     break
 
     def refresh_account_label() -> None:
+        if current_platform == "applemusic":
+            account_var.set("Apple Music 试听无需登录")
+            new_playlist_button.configure(state=tk.DISABLED)
+            rename_playlist_button.configure(state=tk.DISABLED)
+            delete_playlist_button.configure(state=tk.DISABLED)
+            add_song_button.configure(state=tk.DISABLED)
+            remove_song_button.configure(state=tk.NORMAL)
+            download_song_button.configure(state=tk.DISABLED)
+            return
         qq_number = auth.get("qq_number")
         if qq_number:
             account_var.set(f"{platform_display_name(current_platform)}已登录: {qq_number}")
@@ -3042,7 +3191,12 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         window.grab_set()
 
     def start_login_action() -> None:
-        if current_platform == "netease":
+        if current_platform == "applemusic":
+            messagebox.showinfo(
+                "Apple Music",
+                "Apple Music 当前使用公开试听模式，无需登录。\n完整播放、资料库和歌单需要后续接入 MusicKit 授权。",
+            )
+        elif current_platform == "netease":
             choose_netease_login_method()
         else:
             choose_login_method()
@@ -3442,6 +3596,11 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         status_var.set("已退出登录")
 
     def sync_playlists() -> None:
+        if current_platform == "applemusic":
+            remote_playlists.clear()
+            refresh_playlist_list()
+            status_var.set("Apple Music 公开试听模式不支持同步用户歌单")
+            return
         qq_number = auth.get("qq_number", "")
         if not qq_number:
             messagebox.showinfo("提示", f"先登录 {platform_display_name(current_platform)}")
@@ -3543,6 +3702,9 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         threading.Thread(target=worker, daemon=True).start()
 
     def require_login_cookie() -> str | None:
+        if current_platform == "applemusic":
+            messagebox.showinfo("提示", "Apple Music 公开试听模式不支持这个操作")
+            return None
         cookie = auth.get("cookie", "")
         if not cookie:
             messagebox.showinfo("提示", "请先登录")
@@ -3830,6 +3992,9 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         if not song:
             messagebox.showinfo("提示", "先选择一首歌")
             return
+        if current_platform == "applemusic":
+            messagebox.showinfo("提示", "Apple Music 公开试听链接只能在线播放，不能下载保存")
+            return
         if song.local_path:
             messagebox.showinfo("提示", "这首歌已经是本地文件")
             return
@@ -3850,7 +4015,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                     target = target_dir / f"{base_name} ({counter}){extension}"
                     counter += 1
 
-                request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 qqmusic-linux-client/1.0"})
+                request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 music-linux-client/1.0"})
                 with urllib.request.urlopen(request, timeout=timeout) as response, target.open("wb") as file:
                     shutil.copyfileobj(response, file)
 
@@ -4068,7 +4233,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="QQ Music Linux client")
+    parser = argparse.ArgumentParser(description="Music Linux client")
     parser.add_argument("--api-base", default=os.environ.get("QQMUSIC_API_BASE", DEFAULT_API_BASE))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("QQMUSIC_TIMEOUT", DEFAULT_TIMEOUT)))
     parser.add_argument("--player", default=os.environ.get("QQMUSIC_PLAYER"))

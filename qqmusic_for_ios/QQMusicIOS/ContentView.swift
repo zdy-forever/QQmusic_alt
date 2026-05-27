@@ -1,7 +1,7 @@
 import SwiftUI
 
 @MainActor
-final class QQMusicViewModel: ObservableObject {
+final class MusicViewModel: ObservableObject {
     @Published var baseURLText = "http://127.0.0.1:8765" {
         didSet {
             var settings = store.loadSettings()
@@ -22,8 +22,8 @@ final class QQMusicViewModel: ObservableObject {
 
     let player = AudioPlayer()
     let store = LocalJsonStore()
-    private var api: QQMusicAPI {
-        QQMusicAPI(baseURL: URL(string: baseURLText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? URL(string: "http://127.0.0.1:8765")!)
+    private var api: MusicAPI {
+        MusicAPI(baseURL: URL(string: baseURLText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? URL(string: "http://127.0.0.1:8765")!)
     }
 
     init() {
@@ -162,7 +162,7 @@ final class QQMusicViewModel: ObservableObject {
 }
 
 struct ContentView: View {
-    @StateObject private var model = QQMusicViewModel()
+    @StateObject private var model = MusicViewModel()
 
     var body: some View {
         NavigationSplitView {
@@ -177,7 +177,7 @@ struct ContentView: View {
 }
 
 private struct Sidebar: View {
-    @ObservedObject var model: QQMusicViewModel
+    @ObservedObject var model: MusicViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -262,7 +262,7 @@ private struct Sidebar: View {
 }
 
 private struct MainPanel: View {
-    @ObservedObject var model: QQMusicViewModel
+    @ObservedObject var model: MusicViewModel
 
     var body: some View {
         VStack(spacing: 12) {
@@ -360,7 +360,7 @@ private struct NowPlaying: View {
 }
 
 private struct PlayerBar: View {
-    @ObservedObject var model: QQMusicViewModel
+    @ObservedObject var model: MusicViewModel
 
     var body: some View {
         HStack(spacing: 12) {

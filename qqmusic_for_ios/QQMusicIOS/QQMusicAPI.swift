@@ -1,6 +1,6 @@
 import Foundation
 
-final class QQMusicAPI {
+final class MusicAPI {
     var baseURL: URL
 
     init(baseURL: URL) {
@@ -40,7 +40,7 @@ final class QQMusicAPI {
         let path = "/api/song-url?mid=\(encode(song.mid))&media_mid=\(encode(song.mediaMid))&quality=320"
         let response: SongUrlResponse = try await request(path)
         guard let url = URL(string: response.url) else {
-            throw QQMusicAPIError.message("播放地址无效")
+            throw MusicAPIError.message("播放地址无效")
         }
         return url
     }
@@ -69,7 +69,7 @@ final class QQMusicAPI {
 
     private func request<T: Decodable>(_ path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> T {
         guard let url = URL(string: path, relativeTo: baseURL) else {
-            throw QQMusicAPIError.message("接口地址无效")
+            throw MusicAPIError.message("接口地址无效")
         }
 
         var request = URLRequest(url: url)
@@ -82,15 +82,15 @@ final class QQMusicAPI {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            throw QQMusicAPIError.message("后端无响应")
+            throw MusicAPIError.message("后端无响应")
         }
         guard (200...299).contains(http.statusCode) else {
             let error = try? JSONDecoder().decode(ApiErrorResponse.self, from: data)
-            throw QQMusicAPIError.message(error?.error ?? "请求失败：\(http.statusCode)")
+            throw MusicAPIError.message(error?.error ?? "请求失败：\(http.statusCode)")
         }
         let decoded = try JSONDecoder().decode(T.self, from: data)
         if let error = decoded as? ApiErrorResponse, error.ok == false {
-            throw QQMusicAPIError.message(error.error ?? "请求失败")
+            throw MusicAPIError.message(error.error ?? "请求失败")
         }
         return decoded
     }
@@ -102,7 +102,7 @@ final class QQMusicAPI {
     }
 }
 
-enum QQMusicAPIError: LocalizedError {
+enum MusicAPIError: LocalizedError {
     case message(String)
 
     var errorDescription: String? {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Local web version of the QQ Music client.
+"""Local web version of the Music client.
 
 The browser UI talks to this local server. The server reuses the PC client's
-QQ Music API implementation so browser CORS and login-cookie restrictions do
+music API implementation so browser CORS and login-cookie restrictions do
 not leak into the frontend.
 """
 
@@ -218,11 +218,11 @@ def require_account() -> tuple[str, str]:
 
 def safe_filename(value: str) -> str:
     name = re.sub(r"[\\/:*?\"<>|\r\n]+", "_", value).strip(" .")
-    return name or "qqmusic"
+    return name or "music"
 
 
 class Handler(SimpleHTTPRequestHandler):
-    server_version = "QQMusicWeb/0.1"
+    server_version = "MusicWeb/0.1"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         if os.environ.get("QQMUSIC_WEB_LOG"):
@@ -537,7 +537,7 @@ def main() -> int:
     host = os.environ.get("QQMUSIC_WEB_HOST", "127.0.0.1")
     port = int(os.environ.get("QQMUSIC_WEB_PORT", "8765"))
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"QQ Music Web Browser: http://{host}:{port}")
+    print(f"Music Web Browser: http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

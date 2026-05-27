@@ -1,4 +1,4 @@
-# QQ Music Android
+# Music Android
 
 Kotlin + Jetpack Compose 版本，复用 `qqmusic_for_web_browser/server.py` 提供的本地音乐 API。
 
@@ -31,4 +31,4 @@ Android 运行时会在 App 自己的 `filesDir` 下维护：
 - QQ 音乐已预留 QQ/微信手机 SDK 登录入口。
 - 网易云音乐不提供扫码登录；点击“网易云登录”会打开本地 Web 页，用手机号验证码或 Cookie 登录。
 - 没有开放平台 AppID、包名、签名和回调配置时，会退回到本地网页登录/二维码登录。
-- 真正上线时需要接入 Tencent Open SDK 和 WeChat Open SDK，并在 `MobileAuthProvider` 里把授权结果换成后端可保存的 QQ Music Cookie。
+- 真正上线时需要接入 Tencent Open SDK 和 WeChat Open SDK，并在 `MobileAuthProvider` 里把授权结果换成后端可保存的音乐平台 Cookie。

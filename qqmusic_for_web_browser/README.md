@@ -1,4 +1,4 @@
-# QQ Music Web Browser
+# Music Web Browser
 
 浏览器版音乐客户端。前端运行在浏览器里，后端是本机 Python 服务，复用 `qqmusic_for_pc/qqmusic_client.py` 的 QQ 音乐和网易云音乐接口实现。
 

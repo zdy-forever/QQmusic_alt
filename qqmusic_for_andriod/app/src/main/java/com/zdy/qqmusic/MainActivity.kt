@@ -95,15 +95,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            QQMusicTheme {
-                QQMusicApp()
+            MusicTheme {
+                MusicApp()
             }
         }
     }
 }
 
 @Composable
-private fun QQMusicTheme(content: @Composable () -> Unit) {
+private fun MusicTheme(content: @Composable () -> Unit) {
     val colors = darkColorScheme(
         primary = Color(0xFF22C878),
         background = Color(0xFF07111F),
@@ -118,7 +118,7 @@ private fun QQMusicTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun QQMusicApp() {
+private fun MusicApp() {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val scope = rememberCoroutineScope()
@@ -138,7 +138,7 @@ private fun QQMusicApp() {
     var platform by remember { mutableStateOf(savedSettings.platform) }
     var platformName by remember { mutableStateOf(if (savedSettings.platform == "netease") "网易云音乐" else "QQ 音乐") }
 
-    val api = remember(baseUrl) { QQMusicApi(baseUrl) }
+    val api = remember(baseUrl) { MusicApi(baseUrl) }
 
     fun runTask(block: suspend () -> Unit) {
         scope.launch {
@@ -547,7 +547,7 @@ private fun Cover() {
     }
 }
 
-class QQMusicApi(private val baseUrl: String) {
+class MusicApi(private val baseUrl: String) {
     suspend fun state(): BackendState {
         val json = request("GET", "/api/state")
         return BackendState(
