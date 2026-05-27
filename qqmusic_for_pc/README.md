@@ -16,12 +16,13 @@
 
 # QQ Music Linux Client
 
-一个给 Linux Mint 用的简化 QQ 音乐客户端。它主要使用 QQ 音乐网页接口做搜索、歌词、播放链接和歌单操作，然后把音频 URL 交给本机播放器播放。
+一个给 Linux Mint 用的简化音乐客户端。它主要使用 QQ 音乐和网易云音乐网页接口做搜索、歌词、播放链接和歌单读取，然后把音频 URL 交给本机播放器播放。
 
 ## 说明
 
 - 不绕过会员、DRM、地区限制、登录限制或付费限制。
 - 当前版本主要使用 QQ 音乐网页接口；`QQMUSIC_API_BASE` 兼容参数仍保留，但核心的搜索、登录、歌单和播放链接不依赖第三方 API。
+- 设置里可以在 QQ 音乐和网易云音乐之间切换。网易云音乐当前支持搜索、歌词、播放链接、网易云 App 扫码登录、手机号验证码登录、网页登录 Cookie 导入、歌单读取、歌单详情，以及自建歌单的新建、重命名、删除、加入歌曲和移除歌曲。
 - 如果安装了 `python-vlc` 和 VLC/libVLC，会优先用内嵌 VLC 播放，避免每首歌弹出一个 VLC 窗口，并支持拖动进度条快进快退；否则回退到本机播放器。
 - 登录信息保存在本机 `.qqmusic_auth.json`，不要把这个文件分享给别人。
 
@@ -91,6 +92,14 @@ python qqmusic_client.py
 sudo apt install python3-tk vlc
 ```
 
+如果使用已有的 uv 虚拟环境 `common`，直接这样运行：
+
+```bash
+/home/zdy/.venvs/common/bin/python qqmusic_client.py
+```
+
+网易云手机号验证码登录依赖系统 `openssl` 命令做网页登录加密，不需要在 `common` 里额外安装 `cryptography`。
+
 ### 使用 Miniconda/Conda
 
 ```bash
@@ -114,11 +123,27 @@ python3 qqmusic_client.py
 
 登录后输入歌曲名或歌手，搜索，双击结果或点“播放”。底部播放器栏会显示当前歌曲、歌手、队列位置和播放进度，并提供上一首、播放、停止、下一首控制。播放模式可切换为顺序播放、随机播放或单曲循环，并会保存到设置文件。
 
-点击“设置”可以调整歌曲队列显示内容，例如是否显示歌手、专辑名、歌曲时长、MID，以及队列字体大小。设置会保存到 `.qqmusic_settings.json`。设置里也可以切换默认音质、下载目录和启动时是否自动同步歌单。
+点击“设置”可以切换音乐平台，切换后搜索、歌词、播放、登录和歌单都会走对应平台。设置里也可以调整歌曲队列显示内容，例如是否显示歌手、专辑名、歌曲时长、MID，以及队列字体大小。设置会保存到 `.qqmusic_settings.json`，默认音质、下载目录和启动时是否自动同步歌单也会一起保存。
 
 ### 登录并同步歌单
 
 在图形界面里的“设置”中点击“登录”或“重新登录”，程序会先让你选择 QQ 登录或微信登录。选择后用对应手机 App 扫描二维码并确认。登录成功后，程序会把登录信息保存到当前目录的 `.qqmusic_auth.json`，下次启动会自动恢复登录并同步歌单。
+
+切换到网易云音乐后，在“设置”中点击“登录”会先让你选择登录方式：网易云 App 扫码、手机号验证码、导入网页登录 Cookie。推荐优先用网易云 App 扫码；手机号验证码可能会被网易云风控拦截。登录信息会保存到当前目录的 `.netease_auth.json`。
+
+如果网易云提示“当前登录存在安全风险”，可以用“导入Cookie”登录：
+
+1. 用浏览器打开 `https://music.163.com` 并登录。
+2. 按 `F12` 打开开发者工具。
+3. 点击 `Network` 或“网络”。
+4. 刷新网页。
+5. 点击任意 `music.163.com` 请求。
+6. 在 `Request Headers` 或“请求标头”里找到 `Cookie`。
+7. 复制 `Cookie:` 后面的整段内容，粘贴到客户端“导入Cookie”窗口。
+
+复制出来的内容通常很长，里面至少要包含 `MUSIC_U`。
+
+如果你想用微信或 QQ 登录网易云，请先在官方网页版选择微信/QQ登录，登录成功后按上面的步骤导入 Cookie。
 
 之后点击“同步歌单”可以重新加载歌单。双击左侧歌单可以把歌单歌曲载入中间列表。需要切换账号时点击“退出登录”。
 
@@ -136,6 +161,18 @@ python3 qqmusic_client.py
 
 ```bash
 python3 qqmusic_client.py login
+```
+
+网易云发送手机验证码：
+
+```bash
+/home/zdy/.venvs/common/bin/python qqmusic_client.py --platform netease login --send-captcha --phone 13800138000
+```
+
+网易云手机号验证码登录：
+
+```bash
+/home/zdy/.venvs/common/bin/python qqmusic_client.py --platform netease login --phone 13800138000 --captcha 123456
 ```
 
 同步并列出我的歌单：

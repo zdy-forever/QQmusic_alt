@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import io
 import json
 import os
@@ -33,6 +34,7 @@ from typing import Any
 DEFAULT_API_BASE = "https://api.ygking.top"
 DEFAULT_TIMEOUT = 15
 DEFAULT_AUTH_FILE = Path(__file__).with_name(".qqmusic_auth.json")
+DEFAULT_NETEASE_AUTH_FILE = Path(__file__).with_name(".netease_auth.json")
 DEFAULT_SETTINGS_FILE = Path(__file__).with_name(".qqmusic_settings.json")
 PLAYLIST_INITIAL_PAGE_SIZE = 50
 PLAYLIST_BACKGROUND_PAGE_SIZE = 500
@@ -41,8 +43,29 @@ QQ_QR_THIRD_APPID = "100497308"
 WX_QR_APPID = "wx48db31d50e334801"
 WX_QR_REDIRECT_URI = "https://y.qq.com/portal/wx_redirect.html?login_type=2&surl=https%3A%2F%2Fy.qq.com%2F"
 QQ_QR_REDIRECT_URI = "https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https%3A%2F%2Fy.qq.com%2F"
+NETEASE_BASE_URL = "https://music.163.com"
+NETEASE_WEAPI_NONCE = "0CoJUm6Qyw8W8jud"
+NETEASE_WEAPI_PUBKEY = "010001"
+NETEASE_WEAPI_MODULUS = (
+    "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7"
+    "b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280"
+    "104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee2559325"
+    "75cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3"
+    "ece0462db0a22b8e7"
+)
+NETEASE_WEB_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
+)
+NETEASE_DEVICE_XOR_KEY = "3go8&$8*3*3h0k(2)2"
+PLATFORMS = {
+    "qqmusic": "QQ 音乐",
+    "netease": "网易云音乐",
+}
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "platform": "qqmusic",
     "queue_show_singers": True,
     "queue_show_album": True,
     "queue_show_duration": True,
@@ -118,6 +141,12 @@ class WXLoginSession:
     image: bytes
     referer: str
     last_code: str = ""
+
+
+@dataclass
+class NeteaseQRLoginSession:
+    key: str
+    url: str
 
 
 @dataclass
@@ -256,6 +285,55 @@ def musicu_login_fields(cookie: str) -> dict[str, str]:
     if cookie_value(cookie, "login_type") == "2" or cookie_value(cookie, "wxuin"):
         return {"tmeAppID": "qqmusic", "tmeLoginType": "1"}
     return {}
+
+
+def platform_display_name(platform: str) -> str:
+    return PLATFORMS.get(platform, PLATFORMS["qqmusic"])
+
+
+def normalize_platform(value: str | None) -> str:
+    return value if value in PLATFORMS else "qqmusic"
+
+
+def netease_weapi_encrypt(payload: dict[str, Any]) -> dict[str, str]:
+    def aes_encrypt(text: str, key: str) -> str:
+        pad_size = 16 - len(text.encode("utf-8")) % 16
+        padded = text.encode("utf-8") + bytes([pad_size]) * pad_size
+        openssl = shutil.which("openssl")
+        if not openssl:
+            raise QQMusicError("网易云登录需要系统 openssl 命令，请先安装 openssl")
+        result = subprocess.run(
+            [
+                openssl,
+                "enc",
+                "-aes-128-cbc",
+                "-K",
+                key.encode("utf-8").hex(),
+                "-iv",
+                b"0102030405060708".hex(),
+                "-nosalt",
+                "-nopad",
+            ],
+            input=padded,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            error = result.stderr.decode("utf-8", "replace").strip()
+            raise QQMusicError(f"网易云登录加密失败: {error or 'openssl 执行失败'}")
+        return base64.b64encode(result.stdout).decode("ascii")
+
+    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    sec_key = "".join(random.choice(chars) for _ in range(16))
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    params = aes_encrypt(aes_encrypt(text, NETEASE_WEAPI_NONCE), sec_key)
+    reversed_key = sec_key[::-1].encode("utf-8").hex()
+    enc_sec_key = format(
+        pow(int(reversed_key, 16), int(NETEASE_WEAPI_PUBKEY, 16), int(NETEASE_WEAPI_MODULUS, 16)),
+        "x",
+    ).zfill(256)
+    return {"params": params, "encSecKey": enc_sec_key}
 
 
 class QQMusicAPI:
@@ -1210,6 +1288,459 @@ class QQMusicAPI:
         raise QQMusicError(str(message))
 
 
+class NeteaseMusicAPI:
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT):
+        self.timeout = timeout
+        self.session_cookie_pairs: list[str] = []
+        self.device_id = "".join(random.choice("0123456789ABCDEF") for _ in range(52))
+        self._ntes_nuid = binascii.hexlify(os.urandom(32)).decode("ascii")
+        self.wnmcid = "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(6)) + f".{int(time.time() * 1000)}.01.0"
+        self.anonymous_ready = False
+
+    def _base_cookie_pairs(self) -> list[str]:
+        return [
+            "__remember_me=true",
+            "ntes_kaola_ad=1",
+            f"_ntes_nuid={self._ntes_nuid}",
+            f"_ntes_nnid={self._ntes_nuid},{int(time.time() * 1000)}",
+            f"WNMCID={self.wnmcid}",
+            "WEVNSM=1.0.0",
+            "osver=Microsoft-Windows-10-Professional-build-19045-64bit",
+            f"deviceId={self.device_id}",
+            "os=pc",
+            "channel=netease",
+            "appver=3.1.17.204416",
+        ]
+
+    def _merged_cookie_header(self, explicit_cookie: str = "") -> str:
+        explicit_pairs = [pair.strip() for pair in explicit_cookie.split(";") if "=" in pair]
+        merged = merge_cookie_pairs(self._base_cookie_pairs(), self.session_cookie_pairs)
+        merged = merge_cookie_pairs(merged, explicit_pairs)
+        has_music_u = any(pair.split("=", 1)[0] == "MUSIC_U" for pair in merged)
+        has_music_a = any(pair.split("=", 1)[0] == "MUSIC_A" for pair in merged)
+        if not has_music_u and not has_music_a:
+            # The anonymous registration call will fill MUSIC_A. Keep the
+            # rest of the web client cookies stable before that happens.
+            pass
+        return "; ".join(merged)
+
+    def _cloudmusic_dll_encode_id(self, value: str) -> str:
+        xored = "".join(
+            chr(ord(char) ^ ord(NETEASE_DEVICE_XOR_KEY[index % len(NETEASE_DEVICE_XOR_KEY)]))
+            for index, char in enumerate(value)
+        )
+        digest = hashlib.md5(xored.encode("utf-8")).digest()
+        return base64.b64encode(digest).decode("ascii")
+
+    def ensure_anonymous_session(self) -> None:
+        if self.anonymous_ready or any(pair.startswith("MUSIC_A=") for pair in self.session_cookie_pairs):
+            self.anonymous_ready = True
+            return
+        encoded_id = base64.b64encode(f"{self.device_id} {self._cloudmusic_dll_encode_id(self.device_id)}".encode("utf-8")).decode("ascii")
+        try:
+            payload, set_cookies = self._post_form_json(
+                "/weapi/register/anonimous",
+                {"username": encoded_id},
+                encrypted=True,
+                include_session_cookie=False,
+            )
+        except QQMusicError:
+            return
+        if payload.get("code") == 200 and set_cookies:
+            self.session_cookie_pairs = merge_cookie_pairs(self.session_cookie_pairs, cookie_pairs(set_cookies))
+            self.anonymous_ready = True
+
+    def _request(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        data: bytes | None = None,
+        method: str | None = None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        params = {key: value for key, value in (params or {}).items() if value is not None}
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        request_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://music.163.com/",
+            "Origin": "https://music.163.com",
+                "User-Agent": NETEASE_WEB_UA,
+                **(headers or {}),
+        }
+        request_headers["Cookie"] = self._merged_cookie_header(request_headers.get("Cookie", ""))
+
+        request = urllib.request.Request(
+            url,
+            data=data,
+            method=method,
+            headers=request_headers,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read()
+                set_cookies = response.headers.get_all("Set-Cookie") or []
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            set_cookies = exc.headers.get_all("Set-Cookie") or []
+        except urllib.error.URLError as exc:
+            raise QQMusicError(f"网络请求失败: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise QQMusicError("网络请求超时") from exc
+        payload = parse_json_like_response(body)
+        if not isinstance(payload, dict):
+            raise QQMusicError("网易云接口返回格式异常")
+        if set_cookies:
+            self.session_cookie_pairs = merge_cookie_pairs(self.session_cookie_pairs, cookie_pairs(set_cookies))
+        return payload, set_cookies
+
+    def _get_json(self, path: str, params: dict[str, Any] | None = None, cookie: str = "") -> dict[str, Any]:
+        headers = {"Cookie": cookie} if cookie else None
+        payload, _set_cookies = self._request(f"{NETEASE_BASE_URL}{path}", params=params, headers=headers)
+        return payload
+
+    def _post_form_json(
+        self,
+        path: str,
+        params: dict[str, Any],
+        cookie: str = "",
+        encrypted: bool = False,
+        include_session_cookie: bool = True,
+    ) -> tuple[dict[str, Any], list[str]]:
+        body_params = netease_weapi_encrypt(params) if encrypted else params
+        body = urllib.parse.urlencode(body_params).encode("utf-8")
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        if cookie:
+            headers["Cookie"] = cookie
+        elif not include_session_cookie:
+            headers["Cookie"] = "; ".join(self._base_cookie_pairs())
+        return self._request(f"{NETEASE_BASE_URL}{path}", headers=headers, data=body, method="POST")
+
+    def _post_weapi_json(self, path: str, params: dict[str, Any], cookie: str, action: str) -> dict[str, Any]:
+        if not cookie:
+            raise QQMusicError("请先登录")
+        csrf_token = cookie_value(cookie, "__csrf")
+        request_path = path
+        if csrf_token:
+            separator = "&" if "?" in request_path else "?"
+            request_path = f"{request_path}{separator}csrf_token={urllib.parse.quote(csrf_token)}"
+        payload_params = dict(params)
+        payload_params.setdefault("csrf_token", csrf_token)
+        payload, _cookies = self._post_form_json(request_path, payload_params, cookie, encrypted=True)
+        self._raise_if_failed(payload, action)
+        return payload
+
+    def _raise_if_failed(self, payload: dict[str, Any], action: str) -> None:
+        code = payload.get("code")
+        if code in (None, 200, 201):
+            return
+        message = payload.get("message") or payload.get("msg") or payload.get("errmsg") or f"{action}失败（错误码: {code}）"
+        if str(code) in {"301", "-462"}:
+            raise QQMusicError("网易云登录已失效，请重新登录")
+        raise QQMusicError(str(message))
+
+    def send_phone_captcha(self, phone: str, country_code: str = "86") -> None:
+        self.ensure_anonymous_session()
+        payload, _cookies = self._post_form_json(
+            "/weapi/sms/captcha/sent",
+            {
+                "cellphone": phone,
+                "ctcode": country_code,
+            },
+            encrypted=True,
+        )
+        if payload.get("code") != 200 or payload.get("data") is False:
+            payload, _cookies = self._post_form_json(
+                "/weapi/sms/captcha/sent",
+                {
+                    "cellphone": phone,
+                    "ctcode": country_code,
+                    "secrete": "music_middleuser_pclogin",
+                },
+                encrypted=True,
+            )
+        if payload.get("code") != 200 or payload.get("data") is False:
+            raise QQMusicError(str(payload.get("message") or payload.get("msg") or "发送验证码失败"))
+
+    def verify_phone_captcha(self, phone: str, captcha: str, country_code: str = "86") -> None:
+        self.ensure_anonymous_session()
+        payload, _cookies = self._post_form_json(
+            "/weapi/sms/captcha/verify",
+            {
+                "cellphone": phone,
+                "captcha": captcha,
+                "ctcode": country_code,
+            },
+            encrypted=True,
+        )
+        if payload.get("code") != 200 or payload.get("data") is False:
+            message = payload.get("message") or payload.get("msg") or "验证码校验失败"
+            code = payload.get("code")
+            raise QQMusicError(f"{message}（错误码: {code}）" if code is not None else str(message))
+
+    def login_with_phone_captcha(self, phone: str, captcha: str, country_code: str = "86") -> QRLoginResult:
+        self.ensure_anonymous_session()
+        payload, set_cookies = self._login_with_phone_captcha_once(phone, captcha, country_code)
+        if str(payload.get("code")) == "10004":
+            self.verify_phone_captcha(phone, captcha, country_code)
+            payload, set_cookies = self._login_with_phone_captcha_once(phone, captcha, country_code)
+        if payload.get("code") != 200:
+            message = payload.get("message") or payload.get("msg") or "网易云登录失败"
+            code = payload.get("code")
+            if str(code) == "10004":
+                message = f"{message}。这是网易云服务端风控，请稍后再试，或先用官方网页登录后导入 Cookie。"
+            raise QQMusicError(f"{message}（错误码: {code}）" if code is not None else str(message))
+        return self._login_result_from_payload(payload, set_cookies)
+
+    def _login_with_phone_captcha_once(self, phone: str, captcha: str, country_code: str) -> tuple[dict[str, Any], list[str]]:
+        payload, set_cookies = self._post_form_json(
+            "/weapi/w/login/cellphone",
+            {
+                "type": "1",
+                "https": "true",
+                "phone": phone,
+                "countrycode": country_code,
+                "captcha": captcha,
+                "remember": "true",
+            },
+            encrypted=True,
+        )
+        return payload, set_cookies
+
+    def _login_result_from_payload(self, payload: dict[str, Any], set_cookies: list[str]) -> QRLoginResult:
+        profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+        account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+        user_id = str(profile.get("userId") or account.get("id") or "")
+        nickname = str(profile.get("nickname") or "")
+        cookie_pairs_list = cookie_pairs(set_cookies)
+        cookie_text = payload.get("cookie")
+        if isinstance(cookie_text, str) and cookie_text:
+            cookie_pairs_list = merge_cookie_pairs(cookie_pairs_list, [pair.strip() for pair in cookie_text.split(";") if "=" in pair])
+        cookie = "; ".join(cookie_pairs_list)
+        if not user_id:
+            raise QQMusicError("登录成功但没有识别到网易云用户 ID")
+        if not cookie:
+            raise QQMusicError("登录成功但没有拿到网易云 Cookie")
+        return QRLoginResult(qq_number=user_id, cookie=cookie, nickname=nickname)
+
+    def login_with_cookie(self, cookie: str) -> QRLoginResult:
+        cookie = cookie.strip()
+        if not cookie:
+            raise QQMusicError("Cookie 不能为空")
+        payload = self._get_json("/api/nuser/account/get", cookie=cookie)
+        if payload.get("code") != 200:
+            message = payload.get("message") or payload.get("msg") or "网易云 Cookie 校验失败"
+            raise QQMusicError(str(message))
+        profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+        account = payload.get("account") if isinstance(payload.get("account"), dict) else {}
+        user_id = str(profile.get("userId") or account.get("id") or "")
+        nickname = str(profile.get("nickname") or "")
+        if not user_id:
+            raise QQMusicError("这个 Cookie 没有有效网易云登录态，请确认包含 MUSIC_U")
+        return QRLoginResult(qq_number=user_id, cookie=cookie, nickname=nickname)
+
+    def start_qr_login(self) -> NeteaseQRLoginSession:
+        self.ensure_anonymous_session()
+        payload = self._get_json(
+            "/api/login/qrcode/unikey",
+            {"type": 3, "timestamp": int(time.time() * 1000)},
+        )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        key = str(payload.get("unikey") or data.get("unikey") or "")
+        if not key:
+            raise QQMusicError("没有拿到网易云扫码登录 key")
+        return NeteaseQRLoginSession(key=key, url=f"https://music.163.com/login?codekey={urllib.parse.quote(key)}")
+
+    def poll_qr_login(self, session: NeteaseQRLoginSession) -> tuple[str, QRLoginResult | None]:
+        payload = self._get_json(
+            "/api/login/qrcode/client/login",
+            {"key": session.key, "type": 3, "timestamp": int(time.time() * 1000)},
+        )
+        code = str(payload.get("code") or "")
+        if code == "800":
+            return "expired", None
+        if code == "801":
+            return "waiting", None
+        if code == "802":
+            return "confirming", None
+        if code == "803":
+            cookie_text = payload.get("cookie")
+            cookie_pairs_list = list(self.session_cookie_pairs)
+            if isinstance(cookie_text, str) and cookie_text:
+                cookie_pairs_list = merge_cookie_pairs(cookie_pairs_list, [pair.strip() for pair in cookie_text.split(";") if "=" in pair])
+            cookie = "; ".join(cookie_pairs_list)
+            return "done", self.login_with_cookie(cookie)
+        message = payload.get("message") or payload.get("msg") or f"扫码登录失败（错误码: {code or '未知'}）"
+        raise QQMusicError(str(message))
+
+    def search(self, keyword: str, count: int = 30, page: int = 1, cookie: str = "") -> list[Song]:
+        payload, _cookies = self._post_form_json(
+            "/api/cloudsearch/pc",
+            {
+                "s": keyword,
+                "type": 1,
+                "offset": max(0, page - 1) * count,
+                "total": "true" if page == 1 else "false",
+                "limit": count,
+            },
+            cookie,
+        )
+        if payload.get("code") not in (None, 200):
+            raise QQMusicError(str(payload.get("message") or payload.get("msg") or "搜索接口返回错误"))
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        items = result.get("songs") if isinstance(result.get("songs"), list) else []
+        return [normalize_netease_song(item) for item in items if isinstance(item, dict)]
+
+    def song_url(self, mid: str, quality: str = "320", cookie: str = "", media_mid: str = "") -> str:
+        bitrates = {"128": 128000, "320": 320000, "flac": 999000}
+        song_id = media_mid or mid
+        for br in (bitrates.get(quality, 320000), 320000, 128000):
+            payload = self._get_json(
+                "/api/song/enhance/player/url",
+                {"ids": json.dumps([int(song_id) if str(song_id).isdigit() else song_id]), "br": br},
+                cookie,
+            )
+            data = payload.get("data") if isinstance(payload.get("data"), list) else []
+            item = data[0] if data and isinstance(data[0], dict) else {}
+            url = str(item.get("url") or "")
+            if url:
+                return url
+        raise QQMusicError("网易云没有返回可播放链接，可能是会员、版权、地区或登录限制")
+
+    def lyric(self, mid: str, cookie: str = "") -> str:
+        payload = self._get_json(
+            "/api/song/lyric",
+            {"os": "pc", "id": mid, "lv": -1, "kv": -1, "tv": -1},
+            cookie,
+        )
+        lrc = payload.get("lrc") if isinstance(payload.get("lrc"), dict) else {}
+        trans = payload.get("tlyric") if isinstance(payload.get("tlyric"), dict) else {}
+        lyric = str(lrc.get("lyric") or "")
+        translated = str(trans.get("lyric") or "")
+        if translated:
+            return f"{lyric}\n\n--- 翻译 ---\n{translated}".strip()
+        return lyric.strip()
+
+    def playlist_songs_page(
+        self,
+        playlist_id: str,
+        cookie: str = "",
+        begin: int = 0,
+        count: int = PLAYLIST_BACKGROUND_PAGE_SIZE,
+    ) -> tuple[str, list[Song], int]:
+        fetch_count = max(1, begin + count)
+        payload = self._get_json(
+            "/api/v6/playlist/detail",
+            {"id": playlist_id, "n": fetch_count, "s": 0},
+            cookie,
+        )
+        if payload.get("code") != 200:
+            raise QQMusicError(str(payload.get("message") or payload.get("msg") or "歌单详情接口返回错误"))
+        playlist = payload.get("playlist") if isinstance(payload.get("playlist"), dict) else {}
+        name = str(playlist.get("name") or f"歌单 {playlist_id}")
+        tracks = playlist.get("tracks") if isinstance(playlist.get("tracks"), list) else []
+        total = playlist.get("trackCount") or len(playlist.get("trackIds") or []) or len(tracks)
+        try:
+            total_count = int(total)
+        except (TypeError, ValueError):
+            total_count = len(tracks)
+        songs = [normalize_netease_song(item) for item in tracks[begin : begin + count] if isinstance(item, dict)]
+        return name, songs, max(total_count, begin + len(songs))
+
+    def playlist_songs(self, playlist_id: str, cookie: str = "") -> tuple[str, list[Song]]:
+        return self.playlist_songs_page(playlist_id, cookie, 0, PLAYLIST_BACKGROUND_PAGE_SIZE)[:2]
+
+    def user_playlists(self, user_id: str, cookie: str = "") -> list[Playlist]:
+        payload = self._get_json(
+            "/api/user/playlist/",
+            {"uid": user_id, "offset": 0, "limit": 1000},
+            cookie,
+        )
+        if payload.get("code") != 200:
+            raise QQMusicError(str(payload.get("message") or payload.get("msg") or "用户歌单接口返回错误"))
+        items = payload.get("playlist") if isinstance(payload.get("playlist"), list) else []
+        return [normalize_netease_playlist(item) for item in items if isinstance(item, dict)]
+
+    def add_song_to_playlist(
+        self,
+        song_id: str,
+        _song_type: int,
+        playlist_dirid: str,
+        cookie: str,
+        _song_mid: str = "",
+        _playlist_id: str = "",
+    ) -> None:
+        if not song_id:
+            raise QQMusicError("当前歌曲缺少网易云歌曲 ID")
+        if not playlist_dirid:
+            raise QQMusicError("目标歌单缺少网易云歌单 ID")
+        self._post_weapi_json(
+            "/weapi/playlist/manipulate/tracks",
+            {
+                "op": "add",
+                "pid": playlist_dirid,
+                "trackIds": json.dumps([int(song_id) if str(song_id).isdigit() else song_id]),
+                "imme": "true",
+            },
+            cookie,
+            "添加歌曲",
+        )
+
+    def remove_song_from_playlist(self, song_id: str, _song_type: int, playlist_dirid: str, cookie: str) -> None:
+        if not song_id:
+            raise QQMusicError("当前歌曲缺少网易云歌曲 ID")
+        if not playlist_dirid:
+            raise QQMusicError("当前歌单缺少网易云歌单 ID")
+        self._post_weapi_json(
+            "/weapi/playlist/manipulate/tracks",
+            {
+                "op": "del",
+                "pid": playlist_dirid,
+                "trackIds": json.dumps([int(song_id) if str(song_id).isdigit() else song_id]),
+                "imme": "true",
+            },
+            cookie,
+            "移除歌曲",
+        )
+
+    def create_playlist(self, name: str, cookie: str) -> str:
+        payload = self._post_weapi_json(
+            "/weapi/playlist/create",
+            {
+                "name": name,
+                "privacy": 0,
+                "type": "NORMAL",
+            },
+            cookie,
+            "创建歌单",
+        )
+        playlist = payload.get("playlist") if isinstance(payload.get("playlist"), dict) else {}
+        return str(playlist.get("id") or payload.get("id") or "")
+
+    def delete_playlist(self, playlist_dirid: str, cookie: str) -> None:
+        if not playlist_dirid:
+            raise QQMusicError("当前歌单缺少网易云歌单 ID")
+        self._post_weapi_json(
+            "/weapi/playlist/remove",
+            {"ids": f"[{playlist_dirid}]"},
+            cookie,
+            "删除歌单",
+        )
+
+    def rename_playlist(self, playlist_dirid: str, new_name: str, cookie: str) -> None:
+        if not playlist_dirid:
+            raise QQMusicError("当前歌单缺少网易云歌单 ID")
+        self._post_weapi_json(
+            "/weapi/playlist/update/name",
+            {
+                "id": playlist_dirid,
+                "name": new_name,
+            },
+            cookie,
+            "重命名歌单",
+        )
+
+
 def normalize_song(item: dict[str, Any]) -> Song:
     title = str(item.get("title") or item.get("songname") or item.get("name") or "未知歌曲")
     mid = str(item.get("mid") or item.get("songmid") or item.get("strMediaMid") or "")
@@ -1285,7 +1816,52 @@ def normalize_playlist(item: dict[str, Any]) -> Playlist:
     return Playlist(id=playlist_id, name=name, dirid=dirid, song_count=song_count, cover=cover, raw=item)
 
 
-def auth_file_path() -> Path:
+def normalize_netease_song(item: dict[str, Any]) -> Song:
+    song_id = str(item.get("id") or "")
+    title = str(item.get("name") or item.get("title") or "未知歌曲")
+    artists_value = item.get("ar") or item.get("artists") or []
+    if isinstance(artists_value, list):
+        singers = "/".join(str(artist.get("name", "")) for artist in artists_value if isinstance(artist, dict))
+    else:
+        singers = ""
+    album_value = item.get("al") or item.get("album") or {}
+    if isinstance(album_value, dict):
+        album = str(album_value.get("name") or "")
+    else:
+        album = str(album_value or "")
+    duration_value = item.get("dt") or item.get("duration")
+    try:
+        duration = int(duration_value) // 1000 if duration_value is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    return Song(
+        title=title,
+        mid=song_id,
+        song_id=song_id,
+        singers=singers,
+        album=album,
+        duration=duration,
+        media_mid=song_id,
+        raw=item,
+    )
+
+
+def normalize_netease_playlist(item: dict[str, Any]) -> Playlist:
+    playlist_id = str(item.get("id") or "")
+    name = str(item.get("name") or "未命名歌单")
+    count_value = item.get("trackCount") or item.get("song_count")
+    try:
+        song_count = int(count_value) if count_value is not None else None
+    except (TypeError, ValueError):
+        song_count = None
+    cover = str(item.get("coverImgUrl") or item.get("cover") or "")
+    return Playlist(id=playlist_id, name=name, dirid=playlist_id, song_count=song_count, cover=cover, raw=item)
+
+
+def auth_file_path(platform: str | None = None) -> Path:
+    platform = normalize_platform(platform or load_settings().get("platform", "qqmusic"))
+    if platform == "netease":
+        return Path(os.environ.get("NETEASE_AUTH_FILE", DEFAULT_NETEASE_AUTH_FILE))
     return Path(os.environ.get("QQMUSIC_AUTH_FILE", DEFAULT_AUTH_FILE))
 
 
@@ -1395,8 +1971,47 @@ def is_addable_playlist(playlist: Playlist) -> bool:
     return playlist.id != "__downloads__"
 
 
-def load_auth() -> dict[str, str]:
-    path = auth_file_path()
+def is_netease_editable_playlist(playlist: Playlist, user_id: str = "") -> bool:
+    if playlist.id == "__downloads__":
+        return False
+    raw = playlist.raw if isinstance(playlist.raw, dict) else {}
+    if raw.get("subscribed") is True:
+        return False
+    try:
+        special_type = int(raw.get("specialType") or 0)
+    except (TypeError, ValueError):
+        special_type = 0
+    if special_type == 5:
+        return False
+    if user_id:
+        creator = raw.get("creator") if isinstance(raw.get("creator"), dict) else {}
+        creator_id = str(raw.get("userId") or creator.get("userId") or "")
+        if creator_id and creator_id != user_id:
+            return False
+    return bool(playlist.id)
+
+
+def is_netease_addable_playlist(playlist: Playlist, user_id: str = "") -> bool:
+    if playlist.id == "__downloads__":
+        return False
+    raw = playlist.raw if isinstance(playlist.raw, dict) else {}
+    if raw.get("subscribed") is True:
+        return False
+    if user_id:
+        creator = raw.get("creator") if isinstance(raw.get("creator"), dict) else {}
+        creator_id = str(raw.get("userId") or creator.get("userId") or "")
+        if creator_id and creator_id != user_id:
+            return False
+    return bool(playlist.id)
+
+
+def is_netease_song_removable_playlist(playlist: Playlist, user_id: str = "") -> bool:
+    return is_netease_addable_playlist(playlist, user_id)
+
+
+def load_auth(platform: str | None = None) -> dict[str, str]:
+    platform = normalize_platform(platform or load_settings().get("platform", "qqmusic"))
+    path = auth_file_path(platform)
     if not path.exists():
         return {}
     try:
@@ -1407,17 +2022,21 @@ def load_auth() -> dict[str, str]:
     if not isinstance(data, dict):
         return {}
     auth = {str(key): str(value) for key, value in data.items() if value is not None}
-    cookie_account = qq_number_from_cookie(auth.get("cookie", ""))
-    if cookie_account:
-        auth["qq_number"] = cookie_account
+    if platform == "qqmusic":
+        cookie_account = qq_number_from_cookie(auth.get("cookie", ""))
+        if cookie_account:
+            auth["qq_number"] = cookie_account
+    auth["platform"] = platform
     return auth
 
 
-def save_auth(qq_number: str, cookie: str) -> None:
-    path = auth_file_path()
+def save_auth(qq_number: str, cookie: str, platform: str | None = None) -> None:
+    platform = normalize_platform(platform or load_settings().get("platform", "qqmusic"))
+    path = auth_file_path(platform)
     data = {
         "qq_number": qq_number.strip(),
         "cookie": cookie.strip(),
+        "platform": platform,
         "updated_at": str(int(time.time())),
     }
     try:
@@ -1428,8 +2047,8 @@ def save_auth(qq_number: str, cookie: str) -> None:
         raise QQMusicError(f"保存登录信息失败: {exc}") from exc
 
 
-def clear_auth() -> None:
-    path = auth_file_path()
+def clear_auth(platform: str | None = None) -> None:
+    path = auth_file_path(platform)
     try:
         if path.exists():
             path.unlink()
@@ -1573,16 +2192,36 @@ def build_player_args(command: str, url: str) -> list[str]:
     return [command, url]
 
 
+def build_music_api(platform: str, api_base: str = DEFAULT_API_BASE, timeout: int = DEFAULT_TIMEOUT) -> Any:
+    if normalize_platform(platform) == "netease":
+        return NeteaseMusicAPI(timeout=timeout)
+    return QQMusicAPI(base_url=api_base, timeout=timeout)
+
+
 def run_cli(args: argparse.Namespace) -> int:
-    api = QQMusicAPI(base_url=args.api_base, timeout=args.timeout)
-    player = Player(args.player)
+    platform = normalize_platform(args.platform)
+    api = build_music_api(platform, args.api_base, args.timeout)
 
     if args.command == "login":
+        if platform == "netease":
+            if args.send_captcha:
+                if not args.phone:
+                    raise QQMusicError("请用 --phone 传入手机号")
+                api.send_phone_captcha(args.phone)
+                print("验证码已发送")
+                return 0
+            if not args.phone or not args.captcha:
+                raise QQMusicError("网易云登录请传入 --phone 和 --captcha，或先用 --send-captcha 发送验证码")
+            result = api.login_with_phone_captcha(args.phone, args.captcha)
+            save_auth(result.qq_number, result.cookie, platform)
+            print(f"登录成功: {result.nickname or result.qq_number}")
+            return 0
+
         if args.cookie:
             qq_number = args.qq_number or qq_number_from_cookie(args.cookie)
             if not qq_number:
                 raise QQMusicError("没有 QQ 号。请传入 QQ 号，或提供包含 uin/wxuin 的 Cookie")
-            save_auth(qq_number, args.cookie)
+            save_auth(qq_number, args.cookie, platform)
             print(f"已保存登录信息: {qq_number}")
             return 0
 
@@ -1601,7 +2240,7 @@ def run_cli(args: argparse.Namespace) -> int:
             elif state == "expired":
                 raise QQMusicError("二维码已过期，请重新运行 login")
             elif state == "done" and result:
-                save_auth(result.qq_number, result.cookie)
+                save_auth(result.qq_number, result.cookie, platform)
                 print(f"登录成功: {result.nickname or result.qq_number}")
                 return 0
             time.sleep(2)
@@ -1609,15 +2248,15 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "logout":
-        clear_auth()
+        clear_auth(platform)
         print("已退出登录")
         return 0
 
     if args.command == "sync-playlists":
-        auth = load_auth()
+        auth = load_auth(platform)
         qq_number = args.qq_number or auth.get("qq_number", "")
         if not qq_number:
-            raise QQMusicError("还没有登录。先运行 login，或给 sync-playlists 传入 QQ 号")
+            raise QQMusicError("还没有登录。先运行 login，或给 sync-playlists 传入账号 ID")
         playlists = api.user_playlists(qq_number, auth.get("cookie", ""))
         for index, playlist in enumerate(playlists, 1):
             print(f"{index:02d}. {playlist.display}")
@@ -1625,7 +2264,7 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "search":
-        auth = load_auth()
+        auth = load_auth(platform)
         songs = api.search(args.keyword, count=args.count, cookie=auth.get("cookie", ""))
         for index, song in enumerate(songs, 1):
             print(f"{index:02d}. {song.display}")
@@ -1633,13 +2272,14 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "play":
-        auth = load_auth()
+        auth = load_auth(platform)
         songs = api.search(args.keyword, count=args.count, cookie=auth.get("cookie", ""))
         if not songs:
             raise QQMusicError("没有搜索到歌曲")
         song = songs[min(args.index - 1, len(songs) - 1)]
         url = api.song_url(song.mid, args.quality, auth.get("cookie", ""), song.media_mid)
         print(f"正在播放: {song.display}")
+        player = Player(args.player)
         player.play(url)
         if args.wait:
             try:
@@ -1650,7 +2290,7 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "lyric":
-        auth = load_auth()
+        auth = load_auth(platform)
         songs = api.search(args.keyword, count=args.count, cookie=auth.get("cookie", ""))
         if not songs:
             raise QQMusicError("没有搜索到歌曲")
@@ -1669,13 +2309,14 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     except ImportError as exc:
         raise QQMusicError("当前 Python 没有安装 Tkinter，请用命令行模式运行") from exc
 
-    api = QQMusicAPI(base_url=api_base, timeout=timeout)
-    player = Player(player_command)
-    auth = load_auth()
     settings = load_settings()
+    current_platform = normalize_platform(str(settings.get("platform", "qqmusic")))
+    api = build_music_api(current_platform, api_base, timeout)
+    player = Player(player_command)
+    auth = load_auth(current_platform)
 
     root = tk.Tk()
-    root.title("QQ music_for_all_system(developed_by_Linux_Mint)")
+    root.title(f"{platform_display_name(current_platform)} music_for_all_system(developed_by_Linux_Mint)")
     root.geometry("1180x760")
     root.minsize(980, 600)
     root.configure(bg="#e9eef4")
@@ -1702,7 +2343,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
     keyword_var = tk.StringVar()
     quality_var = tk.StringVar(value=str(settings.get("quality", "320")))
-    status_var = tk.StringVar(value=f"播放器: {player.display_name}")
+    status_var = tk.StringVar(value=f"平台: {platform_display_name(current_platform)} | 播放器: {player.display_name}")
     account_var = tk.StringVar()
     player_title_var = tk.StringVar(value="未播放")
     player_meta_var = tk.StringVar(value="选择歌曲后点击播放")
@@ -1909,14 +2550,74 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         state = tk.DISABLED if is_busy else tk.NORMAL
         search_button.configure(state=state)
         settings_button.configure(state=state)
-        new_playlist_button.configure(state=state if auth.get("qq_number") else tk.DISABLED)
-        rename_playlist_button.configure(state=state if auth.get("qq_number") else tk.DISABLED)
-        delete_playlist_button.configure(state=state if auth.get("qq_number") else tk.DISABLED)
-        add_song_button.configure(state=state if auth.get("qq_number") else tk.DISABLED)
-        remove_song_button.configure(state=state if auth.get("qq_number") else tk.DISABLED)
+        write_state = state if auth.get("qq_number") and supports_playlist_write() else tk.DISABLED
+        new_playlist_button.configure(state=write_state)
+        rename_playlist_button.configure(state=write_state)
+        delete_playlist_button.configure(state=write_state)
+        add_song_button.configure(state=write_state)
+        remove_song_button.configure(state=state)
         download_song_button.configure(state=state)
         if message:
             status_var.set(message)
+
+    def supports_playlist_write() -> bool:
+        return current_platform in {"qqmusic", "netease"}
+
+    def playlist_can_write(playlist: Playlist | None) -> bool:
+        if not playlist:
+            return False
+        if current_platform == "netease":
+            return is_netease_editable_playlist(playlist, auth.get("qq_number", ""))
+        return not is_builtin_playlist(playlist)
+
+    def playlist_can_add(playlist: Playlist | None) -> bool:
+        if not playlist:
+            return False
+        if current_platform == "netease":
+            return is_netease_addable_playlist(playlist, auth.get("qq_number", ""))
+        return is_addable_playlist(playlist)
+
+    def playlist_can_remove_song(playlist: Playlist | None) -> bool:
+        if not playlist:
+            return False
+        if current_platform == "netease":
+            return is_netease_song_removable_playlist(playlist, auth.get("qq_number", ""))
+        return playlist_can_write(playlist)
+
+    def switch_platform(new_platform: str) -> None:
+        nonlocal api, auth, current_platform, current_playlist, playback_token, user_stopped
+        new_platform = normalize_platform(new_platform)
+        if new_platform == current_platform:
+            return
+        player.stop()
+        playback_token += 1
+        user_stopped = True
+        current_platform = new_platform
+        settings["platform"] = new_platform
+        try:
+            save_settings(settings)
+        except QQMusicError as exc:
+            status_var.set(str(exc))
+        api = build_music_api(new_platform, api_base, timeout)
+        auth.clear()
+        auth.update(load_auth(new_platform))
+        current_playlist = None
+        remote_playlists.clear()
+        playlists.clear()
+        songs.clear()
+        listbox.delete(0, tk.END)
+        playlist_box.delete(0, tk.END)
+        lyric_text.delete("1.0", tk.END)
+        player_title_var.set("未播放")
+        player_meta_var.set("选择歌曲后点击播放")
+        queue_var.set("0 / 0")
+        info_var.set("搜索歌曲后选择一项")
+        root.title(f"{platform_display_name(new_platform)} music_for_all_system(developed_by_Linux_Mint)")
+        refresh_account_label()
+        refresh_playlist_list()
+        status_var.set(f"已切换到 {platform_display_name(new_platform)}")
+        if auth.get("qq_number") and settings.get("auto_sync_playlists", True):
+            sync_playlists()
 
     def current_duration_ms() -> int | None:
         duration = player.duration_ms()
@@ -2026,20 +2727,21 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     def refresh_account_label() -> None:
         qq_number = auth.get("qq_number")
         if qq_number:
-            account_var.set(f"已登录: {qq_number}")
-            new_playlist_button.configure(state=tk.NORMAL)
-            rename_playlist_button.configure(state=tk.NORMAL)
-            delete_playlist_button.configure(state=tk.NORMAL)
-            add_song_button.configure(state=tk.NORMAL)
+            account_var.set(f"{platform_display_name(current_platform)}已登录: {qq_number}")
+            write_state = tk.NORMAL if supports_playlist_write() else tk.DISABLED
+            new_playlist_button.configure(state=write_state)
+            rename_playlist_button.configure(state=write_state)
+            delete_playlist_button.configure(state=write_state)
+            add_song_button.configure(state=write_state)
             remove_song_button.configure(state=tk.NORMAL)
             download_song_button.configure(state=tk.NORMAL)
         else:
-            account_var.set("未登录")
+            account_var.set(f"{platform_display_name(current_platform)}未登录")
             new_playlist_button.configure(state=tk.DISABLED)
             rename_playlist_button.configure(state=tk.DISABLED)
             delete_playlist_button.configure(state=tk.DISABLED)
             add_song_button.configure(state=tk.DISABLED)
-            remove_song_button.configure(state=tk.DISABLED)
+            remove_song_button.configure(state=tk.NORMAL)
             download_song_button.configure(state=tk.NORMAL)
 
     def selected_song_index() -> int:
@@ -2171,19 +2873,29 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         if not keyword:
             messagebox.showinfo("提示", "先输入歌曲名或歌手")
             return
-        set_busy(True, "正在搜索...")
+        search_platform = current_platform
+        search_api = build_music_api(search_platform, api_base, timeout)
+        search_cookie = auth.get("cookie", "")
+        set_busy(True, f"正在搜索 {platform_display_name(search_platform)}...")
         current_playlist = None
         listbox.delete(0, tk.END)
         songs.clear()
 
         def worker() -> None:
             try:
-                results = api.search(keyword, cookie=auth.get("cookie", ""))
+                results = search_api.search(keyword, cookie=search_cookie)
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 root.after(0, lambda: (set_busy(False, "搜索失败"), messagebox.showerror("搜索失败", message)))
                 return
-            root.after(0, lambda: replace_songs(results, f"找到 {len(results)} 首"))
+
+            def update() -> None:
+                if search_platform != current_platform:
+                    set_busy(False, f"已切换到 {platform_display_name(current_platform)}，忽略旧搜索结果")
+                    return
+                replace_songs(results, f"{platform_display_name(search_platform)}找到 {len(results)} 首")
+
+            root.after(0, update)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2196,8 +2908,22 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         container = ttk.Frame(window, padding=18, style="Panel.TFrame")
         container.grid(row=0, column=0, sticky="nsew")
 
+        platform_title = ttk.Label(container, text="平台", style="Title.TLabel")
+        platform_title.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        platform_setting_var = tk.StringVar(value=platform_display_name(current_platform))
+        platform_box = ttk.Combobox(
+            container,
+            textvariable=platform_setting_var,
+            values=tuple(PLATFORMS.values()),
+            width=12,
+            state="readonly",
+        )
+        platform_box.grid(row=1, column=1, sticky="e", pady=(0, 12))
+        platform_label = ttk.Label(container, text="音乐平台", style="Muted.TLabel")
+        platform_label.grid(row=1, column=0, sticky="w", pady=(0, 12), padx=(0, 12))
+
         title = ttk.Label(container, text="歌曲队列显示", style="Title.TLabel")
-        title.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        title.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 12))
 
         show_singers_var = tk.BooleanVar(value=bool(settings.get("queue_show_singers", True)))
         show_album_var = tk.BooleanVar(value=bool(settings.get("queue_show_album", True)))
@@ -2208,47 +2934,47 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         auto_sync_var = tk.BooleanVar(value=bool(settings.get("auto_sync_playlists", True)))
         download_dir_var = tk.StringVar(value=str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"])))
 
-        ttk.Checkbutton(container, text="显示歌手", variable=show_singers_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(container, text="显示专辑名", variable=show_album_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(container, text="显示歌曲时长", variable=show_duration_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
-        ttk.Checkbutton(container, text="显示 MID", variable=show_mid_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示歌手", variable=show_singers_var).grid(row=3, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示专辑名", variable=show_album_var).grid(row=4, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示歌曲时长", variable=show_duration_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=4)
+        ttk.Checkbutton(container, text="显示 MID", variable=show_mid_var).grid(row=6, column=0, columnspan=2, sticky="w", pady=4)
 
         font_label = ttk.Label(container, text="队列字体大小", style="Muted.TLabel")
-        font_label.grid(row=5, column=0, sticky="w", pady=(12, 4), padx=(0, 12))
+        font_label.grid(row=7, column=0, sticky="w", pady=(12, 4), padx=(0, 12))
         font_size = ttk.Combobox(container, textvariable=font_size_var, values=("10", "11", "12", "13", "14"), width=8, state="readonly")
-        font_size.grid(row=5, column=1, sticky="e", pady=(12, 4))
+        font_size.grid(row=7, column=1, sticky="e", pady=(12, 4))
 
         playback_title = ttk.Label(container, text="播放和同步", style="Title.TLabel")
-        playback_title.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 8))
+        playback_title.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         quality_label = ttk.Label(container, text="默认音质", style="Muted.TLabel")
-        quality_label.grid(row=7, column=0, sticky="w", pady=4, padx=(0, 12))
+        quality_label.grid(row=9, column=0, sticky="w", pady=4, padx=(0, 12))
         quality_setting = ttk.Combobox(container, textvariable=quality_setting_var, values=("128", "320", "flac"), width=8, state="readonly")
-        quality_setting.grid(row=7, column=1, sticky="e", pady=4)
-        ttk.Checkbutton(container, text="启动时自动同步歌单", variable=auto_sync_var).grid(row=8, column=0, columnspan=2, sticky="w", pady=4)
+        quality_setting.grid(row=9, column=1, sticky="e", pady=4)
+        ttk.Checkbutton(container, text="启动时自动同步歌单", variable=auto_sync_var).grid(row=10, column=0, columnspan=2, sticky="w", pady=4)
 
         download_title = ttk.Label(container, text="下载", style="Title.TLabel")
-        download_title.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(18, 8))
+        download_title.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         download_entry = ttk.Entry(container, textvariable=download_dir_var, width=42)
-        download_entry.grid(row=10, column=0, sticky="ew", pady=4, padx=(0, 8))
+        download_entry.grid(row=12, column=0, sticky="ew", pady=4, padx=(0, 8))
 
         def choose_download_dir() -> None:
             selected = filedialog.askdirectory(parent=window, initialdir=download_dir_var.get() or str(Path.home()))
             if selected:
                 download_dir_var.set(selected)
 
-        ttk.Button(container, text="选择目录", command=choose_download_dir, style="Accent.TButton").grid(row=10, column=1, sticky="e", pady=4)
+        ttk.Button(container, text="选择目录", command=choose_download_dir, style="Accent.TButton").grid(row=12, column=1, sticky="e", pady=4)
 
         account_title = ttk.Label(container, text="账号", style="Title.TLabel")
-        account_title.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(18, 8))
+        account_title.grid(row=13, column=0, columnspan=2, sticky="ew", pady=(18, 8))
         account_buttons = ttk.Frame(container, style="Panel.TFrame")
-        account_buttons.grid(row=12, column=0, columnspan=2, sticky="ew")
+        account_buttons.grid(row=14, column=0, columnspan=2, sticky="ew")
         account_button_text = "退出登录" if auth.get("qq_number") else "登录"
-        account_button_command = logout if auth.get("qq_number") else choose_login_method
+        account_button_command = logout if auth.get("qq_number") else start_login_action
         ttk.Button(account_buttons, text=account_button_text, command=lambda: (window.destroy(), account_button_command()), style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
         ttk.Button(account_buttons, text="同步歌单", command=lambda: (window.destroy(), sync_playlists()), style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
 
         buttons = ttk.Frame(container, style="Panel.TFrame")
-        buttons.grid(row=13, column=0, columnspan=2, sticky="e", pady=(18, 0))
+        buttons.grid(row=15, column=0, columnspan=2, sticky="e", pady=(18, 0))
 
         def apply_settings() -> None:
             settings.update(
@@ -2261,6 +2987,9 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                     "quality": quality_setting_var.get(),
                     "auto_sync_playlists": auto_sync_var.get(),
                     "download_dir": download_dir_var.get().strip() or str(DEFAULT_SETTINGS["download_dir"]),
+                    "platform": normalize_platform(
+                        next((key for key, label in PLATFORMS.items() if label == platform_setting_var.get()), platform_setting_var.get())
+                    ),
                 }
             )
             try:
@@ -2272,11 +3001,353 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             quality_var.set(str(settings.get("quality", "320")))
             refresh_song_list()
             refresh_playlist_list()
+            switch_platform(str(settings.get("platform", "qqmusic")))
             status_var.set("设置已保存")
             window.destroy()
 
         ttk.Button(buttons, text="取消", command=window.destroy, style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="保存", command=apply_settings, style="Accent.TButton").grid(row=0, column=1)
+        window.grab_set()
+
+    def start_login_action() -> None:
+        if current_platform == "netease":
+            choose_netease_login_method()
+        else:
+            choose_login_method()
+
+    def choose_netease_login_method() -> None:
+        window = tk.Toplevel(root)
+        window.title("网易云音乐登录")
+        window.resizable(False, False)
+        window.transient(root)
+
+        container = ttk.Frame(window, padding=18, style="Panel.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
+        title = ttk.Label(container, text="选择网易云登录方式", style="Title.TLabel", anchor="center")
+        title.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+
+        def start(action: Any) -> None:
+            window.destroy()
+            action()
+
+        ttk.Button(container, text="网易云App扫码", command=lambda: start(netease_qr_login), style="Accent.TButton").grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(container, text="手机号验证码", command=lambda: start(netease_phone_login), style="Accent.TButton").grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(container, text="导入网页登录Cookie", command=lambda: start(import_netease_cookie_login), style="Accent.TButton").grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ttk.Button(container, text="取消", command=window.destroy, style="Accent.TButton").grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        window.grab_set()
+
+    def finish_netease_login(result: QRLoginResult, *windows: tk.Toplevel) -> None:
+        save_auth(result.qq_number, result.cookie, current_platform)
+        auth.clear()
+        auth.update(load_auth(current_platform))
+        refresh_account_label()
+        set_busy(False, f"已登录: {result.nickname or result.qq_number}")
+        for login_window in windows:
+            if login_window.winfo_exists():
+                login_window.destroy()
+        sync_playlists()
+
+    def netease_qr_login() -> None:
+        set_busy(True, "正在获取网易云扫码登录链接...")
+        qr_window: tk.Toplevel | None = None
+        cancelled = False
+
+        def close_qr() -> None:
+            nonlocal cancelled
+            cancelled = True
+            if qr_window and qr_window.winfo_exists():
+                qr_window.destroy()
+            set_busy(False, "已取消登录")
+
+        def show_qr(session: NeteaseQRLoginSession) -> None:
+            nonlocal qr_window
+            qr_window = tk.Toplevel(root)
+            qr_window.title("网易云扫码登录")
+            qr_window.geometry("560x230")
+            qr_window.transient(root)
+            qr_window.protocol("WM_DELETE_WINDOW", close_qr)
+
+            container = ttk.Frame(qr_window, padding=18, style="Panel.TFrame")
+            container.grid(row=0, column=0, sticky="nsew")
+            qr_window.columnconfigure(0, weight=1)
+            container.columnconfigure(0, weight=1)
+            ttk.Label(container, text="使用网易云音乐 App 扫码登录", style="Title.TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            ttk.Label(container, text="已打开官方登录页。如果浏览器没有弹出，复制下面链接到浏览器，再用网易云音乐 App 扫码确认。", wraplength=520, style="Muted.TLabel").grid(row=1, column=0, sticky="ew")
+            url_entry = tk.Entry(container, borderwidth=1, relief=tk.SOLID)
+            url_entry.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+            url_entry.insert(0, session.url)
+            url_entry.selection_range(0, tk.END)
+
+            def copy_url() -> None:
+                root.clipboard_clear()
+                root.clipboard_append(session.url)
+                status_var.set("扫码登录链接已复制")
+
+            buttons = ttk.Frame(container, style="Panel.TFrame")
+            buttons.grid(row=3, column=0, sticky="e", pady=(14, 0))
+            ttk.Button(buttons, text="复制链接", command=copy_url, style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
+            ttk.Button(buttons, text="打开链接", command=lambda: webbrowser.open(session.url), style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
+            ttk.Button(buttons, text="取消", command=close_qr, style="Accent.TButton").grid(row=0, column=2)
+            status_var.set("等待网易云 App 扫码...")
+            webbrowser.open(session.url)
+
+        def worker() -> None:
+            try:
+                session = api.start_qr_login()
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc)
+                root.after(0, lambda: (set_busy(False, "获取扫码链接失败"), messagebox.showerror("登录失败", message)))
+                return
+            root.after(0, lambda: show_qr(session))
+            deadline = time.time() + 180
+            while time.time() < deadline and not cancelled:
+                try:
+                    state, result = api.poll_qr_login(session)
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    root.after(0, lambda: (set_busy(False, "登录失败"), messagebox.showerror("登录失败", message)))
+                    return
+                if state == "waiting":
+                    root.after(0, lambda: status_var.set("等待网易云 App 扫码..."))
+                elif state == "confirming":
+                    root.after(0, lambda: status_var.set("已扫码，等待手机确认..."))
+                elif state == "expired":
+                    root.after(0, lambda: (set_busy(False, "二维码已过期"), messagebox.showinfo("登录", "二维码已过期，请重新登录")))
+                    return
+                elif state == "done" and result:
+                    root.after(0, lambda: finish_netease_login(result, qr_window) if qr_window else finish_netease_login(result))
+                    return
+                time.sleep(2)
+            if not cancelled:
+                root.after(0, lambda: (set_busy(False, "登录超时"), messagebox.showinfo("登录", "登录超时，请重新登录")))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def import_netease_cookie_login() -> None:
+        cookie_window = tk.Toplevel(root)
+        cookie_window.title("导入网易云 Cookie")
+        cookie_window.geometry("620x360")
+        cookie_window.transient(root)
+
+        cookie_container = ttk.Frame(cookie_window, padding=14, style="Panel.TFrame")
+        cookie_container.grid(row=0, column=0, sticky="nsew")
+        cookie_window.columnconfigure(0, weight=1)
+        cookie_window.rowconfigure(0, weight=1)
+        cookie_container.columnconfigure(0, weight=1)
+        cookie_container.rowconfigure(2, weight=1)
+
+        ttk.Label(cookie_container, text="粘贴官方网页版登录后的 Cookie", style="Title.TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        instructions = (
+            "获取方式：1. 用浏览器打开 music.163.com 并登录；"
+            "2. 按 F12 打开开发者工具；3. 点 Network/网络；"
+            "4. 刷新网页；5. 点任意 music.163.com 请求；"
+            "6. 在 Request Headers/请求标头里复制 Cookie 整行的值。"
+        )
+        ttk.Label(cookie_container, text=instructions, wraplength=580, style="Muted.TLabel").grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        cookie_text = tk.Text(cookie_container, height=8, wrap=tk.WORD)
+        cookie_text.grid(row=2, column=0, sticky="nsew")
+        hint = ttk.Label(cookie_container, text="复制内容通常很长；至少需要包含 MUSIC_U。导入后会保存到本机 .netease_auth.json。", style="Muted.TLabel")
+        hint.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        cookie_buttons = ttk.Frame(cookie_container, style="Panel.TFrame")
+        cookie_buttons.grid(row=4, column=0, sticky="e", pady=(12, 0))
+
+        def submit_cookie() -> None:
+            cookie = cookie_text.get("1.0", tk.END).strip()
+            if not cookie:
+                messagebox.showinfo("提示", "请先粘贴 Cookie", parent=cookie_window)
+                return
+            import_button.configure(state=tk.DISABLED)
+
+            def worker() -> None:
+                try:
+                    result = api.login_with_cookie(cookie)
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    root.after(0, lambda: (import_button.configure(state=tk.NORMAL), messagebox.showerror("导入失败", message, parent=cookie_window)))
+                    return
+                root.after(0, lambda: finish_netease_login(result, cookie_window))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        ttk.Button(cookie_buttons, text="取消", command=cookie_window.destroy, style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
+        import_button = ttk.Button(cookie_buttons, text="导入", command=submit_cookie, style="Accent.TButton")
+        import_button.grid(row=0, column=1)
+        cookie_window.grab_set()
+
+    def netease_phone_login() -> None:
+        window = tk.Toplevel(root)
+        window.title("网易云音乐登录")
+        window.resizable(False, False)
+        window.transient(root)
+
+        container = ttk.Frame(window, padding=18, style="Panel.TFrame")
+        container.grid(row=0, column=0, sticky="nsew")
+        title = ttk.Label(container, text="手机号验证码登录", style="Title.TLabel")
+        title.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+
+        phone_var = tk.StringVar()
+        captcha_var = tk.StringVar()
+        country_var = tk.StringVar(value="86")
+        login_status_var = tk.StringVar(value="")
+        captcha_sent = False
+
+        ttk.Label(container, text="区号", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 8))
+        ttk.Entry(container, textvariable=country_var, width=6).grid(row=1, column=1, sticky="w", pady=4)
+        ttk.Label(container, text="手机号", style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=4, padx=(0, 8))
+        ttk.Entry(container, textvariable=phone_var, width=24).grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(container, text="短信验证码", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=4, padx=(0, 8))
+        ttk.Entry(container, textvariable=captcha_var, width=18).grid(row=3, column=1, sticky="w", pady=4)
+        status_label = ttk.Label(container, textvariable=login_status_var, style="Muted.TLabel")
+        status_label.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        buttons = ttk.Frame(container, style="Panel.TFrame")
+        buttons.grid(row=5, column=0, columnspan=3, sticky="e", pady=(16, 0))
+
+        def phone_inputs() -> tuple[str, str]:
+            phone = phone_var.get().strip()
+            country_code = country_var.get().strip() or "86"
+            if not phone:
+                raise QQMusicError("请输入手机号")
+            if not country_code.isdigit():
+                raise QQMusicError("区号只能填写数字")
+            return phone, country_code
+
+        def send_captcha() -> None:
+            nonlocal captcha_sent
+            try:
+                phone, country_code = phone_inputs()
+            except QQMusicError as exc:
+                messagebox.showinfo("提示", str(exc), parent=window)
+                return
+            captcha_sent = False
+            send_button.configure(state=tk.DISABLED)
+            login_status_var.set("正在发送验证码...")
+
+            def worker() -> None:
+                try:
+                    api.send_phone_captcha(phone, country_code)
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    root.after(0, lambda: (send_button.configure(state=tk.NORMAL), login_status_var.set("发送失败"), messagebox.showerror("发送失败", message, parent=window)))
+                    return
+                def update_sent() -> None:
+                    nonlocal captcha_sent
+                    captcha_sent = True
+                    send_button.configure(state=tk.NORMAL)
+                    login_status_var.set("验证码已发送，请输入短信里的完整数字验证码")
+
+                root.after(0, update_sent)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def submit_login() -> None:
+            if not captcha_sent:
+                messagebox.showinfo("提示", "请先在当前窗口发送验证码，再输入收到的新验证码登录", parent=window)
+                return
+            try:
+                phone, country_code = phone_inputs()
+            except QQMusicError as exc:
+                messagebox.showinfo("提示", str(exc), parent=window)
+                return
+            captcha = captcha_var.get().strip()
+            if not captcha:
+                messagebox.showinfo("提示", "请输入验证码", parent=window)
+                return
+            if not captcha.isdigit() or not (4 <= len(captcha) <= 8):
+                messagebox.showinfo("提示", "请输入短信里的数字验证码，网易云通常是 6 位", parent=window)
+                return
+            login_button.configure(state=tk.DISABLED)
+            login_status_var.set("正在登录...")
+
+            def worker() -> None:
+                try:
+                    result = api.login_with_phone_captcha(phone, captcha, country_code)
+                    save_auth(result.qq_number, result.cookie, current_platform)
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    root.after(0, lambda: (login_button.configure(state=tk.NORMAL), login_status_var.set("登录失败"), messagebox.showerror("登录失败", message, parent=window)))
+                    return
+
+                def update() -> None:
+                    auth.clear()
+                    auth.update(load_auth(current_platform))
+                    refresh_account_label()
+                    set_busy(False, f"已登录: {result.nickname or result.qq_number}")
+                    window.destroy()
+                    sync_playlists()
+
+                root.after(0, update)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def import_cookie_login() -> None:
+            cookie_window = tk.Toplevel(window)
+            cookie_window.title("导入网易云 Cookie")
+            cookie_window.geometry("620x360")
+            cookie_window.transient(window)
+
+            cookie_container = ttk.Frame(cookie_window, padding=14, style="Panel.TFrame")
+            cookie_container.grid(row=0, column=0, sticky="nsew")
+            cookie_window.columnconfigure(0, weight=1)
+            cookie_window.rowconfigure(0, weight=1)
+            cookie_container.columnconfigure(0, weight=1)
+            cookie_container.rowconfigure(2, weight=1)
+
+            ttk.Label(cookie_container, text="粘贴官方网页版登录后的 Cookie", style="Title.TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            instructions = (
+                "获取方式：1. 用浏览器打开 music.163.com 并登录；"
+                "2. 按 F12 打开开发者工具；3. 点 Network/网络；"
+                "4. 刷新网页；5. 点任意 music.163.com 请求；"
+                "6. 在 Request Headers/请求标头里复制 Cookie 整行的值。"
+            )
+            ttk.Label(cookie_container, text=instructions, wraplength=580, style="Muted.TLabel").grid(row=1, column=0, sticky="ew", pady=(0, 10))
+            cookie_text = tk.Text(cookie_container, height=8, wrap=tk.WORD)
+            cookie_text.grid(row=2, column=0, sticky="nsew")
+            hint = ttk.Label(cookie_container, text="复制内容通常很长；至少需要包含 MUSIC_U。导入后会保存到本机 .netease_auth.json。", style="Muted.TLabel")
+            hint.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+            cookie_buttons = ttk.Frame(cookie_container, style="Panel.TFrame")
+            cookie_buttons.grid(row=4, column=0, sticky="e", pady=(12, 0))
+
+            def submit_cookie() -> None:
+                cookie = cookie_text.get("1.0", tk.END).strip()
+                if not cookie:
+                    messagebox.showinfo("提示", "请先粘贴 Cookie", parent=cookie_window)
+                    return
+                import_button.configure(state=tk.DISABLED)
+
+                def worker() -> None:
+                    try:
+                        result = api.login_with_cookie(cookie)
+                        save_auth(result.qq_number, result.cookie, current_platform)
+                    except Exception as exc:  # noqa: BLE001
+                        message = str(exc)
+                        root.after(0, lambda: (import_button.configure(state=tk.NORMAL), messagebox.showerror("导入失败", message, parent=cookie_window)))
+                        return
+
+                    def update() -> None:
+                        auth.clear()
+                        auth.update(load_auth(current_platform))
+                        refresh_account_label()
+                        set_busy(False, f"已登录: {result.nickname or result.qq_number}")
+                        cookie_window.destroy()
+                        window.destroy()
+                        sync_playlists()
+
+                    root.after(0, update)
+
+                threading.Thread(target=worker, daemon=True).start()
+
+            ttk.Button(cookie_buttons, text="取消", command=cookie_window.destroy, style="Accent.TButton").grid(row=0, column=0, padx=(0, 8))
+            import_button = ttk.Button(cookie_buttons, text="导入", command=submit_cookie, style="Accent.TButton")
+            import_button.grid(row=0, column=1)
+            cookie_window.grab_set()
+
+        send_button = ttk.Button(buttons, text="发送验证码", command=send_captcha, style="Accent.TButton")
+        send_button.grid(row=0, column=0, padx=(0, 8))
+        ttk.Button(buttons, text="导入Cookie", command=import_cookie_login, style="Accent.TButton").grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(buttons, text="取消", command=window.destroy, style="Accent.TButton").grid(row=0, column=2, padx=(0, 8))
+        login_button = ttk.Button(buttons, text="登录", command=submit_login, style="Accent.TButton")
+        login_button.grid(row=0, column=3)
         window.grab_set()
 
     def choose_login_method() -> None:
@@ -2361,9 +3432,9 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             qr_cancelled = True
             if qr_window and qr_window.winfo_exists():
                 qr_window.destroy()
-            save_auth(result.qq_number, result.cookie)
+            save_auth(result.qq_number, result.cookie, current_platform)
             auth.clear()
-            auth.update(load_auth())
+            auth.update(load_auth(current_platform))
             refresh_account_label()
             set_busy(False, f"已登录: {result.nickname or result.qq_number}")
             sync_playlists()
@@ -2406,7 +3477,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
     def logout() -> None:
         player.stop()
-        clear_auth()
+        clear_auth(current_platform)
         auth.clear()
         remote_playlists.clear()
         playlists.clear()
@@ -2418,7 +3489,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     def sync_playlists() -> None:
         qq_number = auth.get("qq_number", "")
         if not qq_number:
-            messagebox.showinfo("提示", "先点击登录，用手机 QQ 扫码确认")
+            messagebox.showinfo("提示", f"先登录 {platform_display_name(current_platform)}")
             return
         set_busy(True, "正在同步歌单...")
 
@@ -2549,7 +3620,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         if not cookie or not playlist:
             messagebox.showinfo("提示", "先选择一个歌单")
             return
-        if is_builtin_playlist(playlist):
+        if not playlist_can_write(playlist):
             messagebox.showinfo("提示", f"“{playlist.name}”不是可重命名的自建歌单")
             return
         name = simpledialog.askstring("重命名歌单", "新名称:", initialvalue=playlist.name, parent=root)
@@ -2579,7 +3650,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                     0,
                     lambda: (
                         set_busy(False, "重命名未生效"),
-                        messagebox.showerror("重命名失败", "QQ 音乐已接受请求，但刷新后歌单名称仍未变化，请稍后重试或重新登录。"),
+                        messagebox.showerror("重命名失败", f"{platform_display_name(current_platform)}已接受请求，但刷新后歌单名称仍未变化，请稍后重试或重新登录。"),
                     ),
                 )
                 return
@@ -2603,7 +3674,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         if not cookie or not playlist:
             messagebox.showinfo("提示", "先选择一个歌单")
             return
-        if is_builtin_playlist(playlist):
+        if not playlist_can_write(playlist):
             messagebox.showinfo("提示", f"“{playlist.name}”不是可删除的自建歌单")
             return
         if not messagebox.askyesno("删除歌单", f"确定删除“{playlist.name}”吗？"):
@@ -2630,11 +3701,11 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         if not cookie:
             return
         if not song.song_id:
-            messagebox.showerror("添加失败", "当前歌曲缺少 QQ 音乐 song id")
+            messagebox.showerror("添加失败", f"当前歌曲缺少{platform_display_name(current_platform)}歌曲 ID")
             return
-        candidates = [playlist for playlist in remote_playlists if is_addable_playlist(playlist)]
+        candidates = [playlist for playlist in remote_playlists if playlist_can_add(playlist)]
         if not candidates:
-            messagebox.showinfo("提示", "还没有可加入的 QQ 音乐歌单，请先同步或新建歌单")
+            messagebox.showinfo("提示", f"还没有可加入的{platform_display_name(current_platform)}自建歌单，请先同步或新建歌单")
             return
         if len(candidates) == 1:
             add_song_to_playlist_target(song, candidates[0], cookie)
@@ -2759,7 +3830,10 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         if not cookie:
             return
         if not song.song_id:
-            messagebox.showerror("移除失败", "当前歌曲缺少 QQ 音乐 song id")
+            messagebox.showerror("移除失败", f"当前歌曲缺少{platform_display_name(current_platform)}歌曲 ID")
+            return
+        if not playlist_can_remove_song(current_playlist):
+            messagebox.showinfo("提示", f"“{current_playlist.name}”不支持移除歌曲")
             return
         if not messagebox.askyesno("移除歌曲", f"从“{current_playlist.name}”移除“{song.title}”？"):
             return
@@ -3000,6 +4074,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-base", default=os.environ.get("QQMUSIC_API_BASE", DEFAULT_API_BASE))
     parser.add_argument("--timeout", type=int, default=int(os.environ.get("QQMUSIC_TIMEOUT", DEFAULT_TIMEOUT)))
     parser.add_argument("--player", default=os.environ.get("QQMUSIC_PLAYER"))
+    parser.add_argument(
+        "--platform",
+        default=os.environ.get("MUSIC_PLATFORM", str(load_settings().get("platform", "qqmusic"))),
+        choices=tuple(PLATFORMS.keys()),
+        help="音乐平台",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -3007,6 +4087,9 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("qq_number", nargs="?", help="仅 --cookie 调试模式需要；普通登录不用填写")
     login_parser.add_argument("--cookie", help="调试用：直接保存 QQ 音乐网页登录 Cookie")
     login_parser.add_argument("--timeout-seconds", type=int, default=180, help="扫码登录超时时间")
+    login_parser.add_argument("--phone", help="网易云手机号登录使用")
+    login_parser.add_argument("--captcha", help="网易云短信验证码")
+    login_parser.add_argument("--send-captcha", action="store_true", help="网易云发送短信验证码")
 
     subparsers.add_parser("logout", help="删除本地登录信息")
 
