@@ -143,6 +143,29 @@ def current_auth() -> dict[str, str]:
     return load_auth(current_platform())
 
 
+def account_display_name(auth: dict[str, str]) -> str:
+    return auth.get("nickname") or auth.get("username") or auth.get("qq_number", "")
+
+
+def auth_with_display_name(platform: str) -> dict[str, str]:
+    auth = load_auth(platform)
+    if auth.get("nickname") or not auth.get("qq_number") or not auth.get("cookie"):
+        return auth
+    try:
+        if platform == "qqmusic":
+            nickname = qq_api.user_nickname(auth.get("qq_number", ""), auth.get("cookie", ""))
+        elif platform == "netease":
+            nickname = build_music_api("netease", api_base, api_timeout).login_with_cookie(auth.get("cookie", "")).nickname
+        else:
+            nickname = ""
+    except Exception:
+        return auth
+    if nickname:
+        save_auth(auth.get("qq_number", ""), auth.get("cookie", ""), platform, nickname)
+        auth["nickname"] = nickname
+    return auth
+
+
 def json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
@@ -307,12 +330,13 @@ class Handler(SimpleHTTPRequestHandler):
     def handle_api_get(self, path: str, query: dict[str, list[str]]) -> None:
         if path == "/api/state":
             platform = current_platform()
-            auth = load_auth(platform)
+            auth = auth_with_display_name(platform)
             self.send_json(
                 {
                     "ok": True,
                     "logged_in": bool(auth.get("qq_number")),
                     "account": auth.get("qq_number", ""),
+                    "display_name": account_display_name(auth),
                     "platform": platform,
                     "platform_name": platform_display_name(platform),
                 }
@@ -342,10 +366,11 @@ class Handler(SimpleHTTPRequestHandler):
             provider, session = entry
             state, result = qq_api.poll_wx_qr_login(session) if provider == "wechat" else qq_api.poll_qr_login(session)
             if result:
-                save_auth(result.qq_number, result.cookie, "qqmusic")
+                save_auth(result.qq_number, result.cookie, "qqmusic", result.nickname)
                 with login_lock:
                     login_sessions.pop(session_id, None)
-                self.send_json({"ok": True, "state": "done", "account": result.qq_number, "nickname": result.nickname})
+                display_name = result.nickname or result.qq_number
+                self.send_json({"ok": True, "state": "done", "account": result.qq_number, "display_name": display_name, "nickname": result.nickname})
             else:
                 self.send_json({"ok": True, "state": state})
             return
@@ -444,8 +469,8 @@ class Handler(SimpleHTTPRequestHandler):
                 raise QQMusicError("手机号和验证码不能为空")
             api = build_music_api("netease", api_base, api_timeout)
             result = api.login_with_phone_captcha(phone, captcha, country_code)
-            save_auth(result.qq_number, result.cookie, "netease")
-            self.send_json({"ok": True, "account": result.qq_number, "nickname": result.nickname})
+            save_auth(result.qq_number, result.cookie, "netease", result.nickname)
+            self.send_json({"ok": True, "account": result.qq_number, "display_name": result.nickname or result.qq_number, "nickname": result.nickname})
             return
 
         if path == "/api/netease/login/cookie" and method == "POST":
@@ -453,8 +478,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not cookie:
                 raise QQMusicError("Cookie 不能为空")
             result = build_music_api("netease", api_base, api_timeout).login_with_cookie(cookie)
-            save_auth(result.qq_number, result.cookie, "netease")
-            self.send_json({"ok": True, "account": result.qq_number, "nickname": result.nickname})
+            save_auth(result.qq_number, result.cookie, "netease", result.nickname)
+            self.send_json({"ok": True, "account": result.qq_number, "display_name": result.nickname or result.qq_number, "nickname": result.nickname})
             return
 
         if path == "/api/playlists" and method == "POST":

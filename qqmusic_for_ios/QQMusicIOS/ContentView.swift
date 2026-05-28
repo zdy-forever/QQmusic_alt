@@ -10,6 +10,7 @@ final class MusicViewModel: ObservableObject {
         }
     }
     @Published var account = ""
+    @Published var displayName = ""
     @Published var status = "准备就绪"
     @Published var playlists: [Playlist] = []
     @Published var songs: [Song] = []
@@ -37,6 +38,7 @@ final class MusicViewModel: ObservableObject {
         do {
             let state = try await api.state()
             account = state.account
+            displayName = state.displayName.isEmpty ? state.account : state.displayName
             platform = state.platform
             platformName = state.platformName
             store.saveAuth(account: state.account, provider: state.loggedIn ? "backend" : "")
@@ -45,6 +47,7 @@ final class MusicViewModel: ObservableObject {
                 songs = []
                 selectedPlaylist = nil
                 selectedSong = nil
+                displayName = ""
                 status = "未登录"
                 return
             }
@@ -68,6 +71,7 @@ final class MusicViewModel: ObservableObject {
             platform = nextPlatform
             platformName = nextPlatform == "netease" ? "网易云音乐" : "QQ 音乐"
             account = ""
+            displayName = ""
             playlists = []
             songs = []
             selectedPlaylist = nil
@@ -185,7 +189,7 @@ private struct Sidebar: View {
                 Logo()
                 VStack(alignment: .leading) {
                     Text(model.platformName).font(.title2.bold())
-                    Text(model.account.isEmpty ? "未登录" : "已登录：\(model.account)")
+                    Text(model.account.isEmpty ? "未登录" : "已登录：\(model.displayName.isEmpty ? model.account : model.displayName)")
                         .foregroundStyle(.secondary)
                 }
             }

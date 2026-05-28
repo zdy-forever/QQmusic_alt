@@ -4,6 +4,7 @@ struct ApiState: Decodable {
     let ok: Bool
     let loggedIn: Bool
     let account: String
+    let displayName: String
     let platform: String
     let platformName: String
 
@@ -11,6 +12,7 @@ struct ApiState: Decodable {
         case ok
         case loggedIn = "logged_in"
         case account
+        case displayName = "display_name"
         case platform
         case platformName = "platform_name"
     }

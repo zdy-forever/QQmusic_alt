@@ -87,6 +87,7 @@ data class LocalSettings(
 
 data class BackendState(
     val account: String = "",
+    val displayName: String = "",
     val platform: String = "qqmusic",
     val platformName: String = "QQ 音乐",
 )
@@ -128,6 +129,7 @@ private fun MusicApp() {
 
     var baseUrl by remember { mutableStateOf(savedSettings.baseUrl) }
     var account by remember { mutableStateOf("") }
+    var displayName by remember { mutableStateOf("") }
     var status by remember { mutableStateOf("准备就绪") }
     var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
     var selectedPlaylist by remember { mutableStateOf<Playlist?>(null) }
@@ -153,6 +155,7 @@ private fun MusicApp() {
     suspend fun refreshAll() {
         val state = api.state()
         account = state.account
+        displayName = state.displayName.ifBlank { state.account }
         platform = state.platform
         platformName = state.platformName
         store.saveAuth(state.account, if (state.account.isBlank()) "" else "backend")
@@ -177,6 +180,7 @@ private fun MusicApp() {
         platformName = if (nextPlatform == "netease") "网易云音乐" else "QQ 音乐"
         store.saveSettings(savedSettings.copy(baseUrl = baseUrl, platform = nextPlatform))
         account = ""
+        displayName = ""
         playlists = emptyList()
         songs = emptyList()
         selectedPlaylist = null
@@ -224,6 +228,7 @@ private fun MusicApp() {
                 baseUrl = baseUrl,
                 onBaseUrlChange = { baseUrl = it },
                 account = account,
+                displayName = displayName,
                 platform = platform,
                 platformName = platformName,
                 status = status,
@@ -334,6 +339,7 @@ private fun Header(
     baseUrl: String,
     onBaseUrlChange: (String) -> Unit,
     account: String,
+    displayName: String,
     platform: String,
     platformName: String,
     status: String,
@@ -350,7 +356,7 @@ private fun Header(
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(platformName, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                    Text(if (account.isBlank()) "未登录" else "已登录：$account", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (account.isBlank()) "未登录" else "已登录：${displayName.ifBlank { account }}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Text(status, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -552,6 +558,7 @@ class MusicApi(private val baseUrl: String) {
         val json = request("GET", "/api/state")
         return BackendState(
             account = json.optString("account"),
+            displayName = json.optString("display_name", json.optString("account")),
             platform = json.optString("platform", "qqmusic"),
             platformName = json.optString("platform_name", "QQ 音乐"),
         )

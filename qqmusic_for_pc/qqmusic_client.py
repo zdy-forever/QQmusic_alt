@@ -989,6 +989,31 @@ class QQMusicAPI:
         playlists = [normalize_playlist(item) for item in items if isinstance(item, dict)]
         return [playlist for playlist in playlists if playlist.id]
 
+    def user_nickname(self, qq_number: str, cookie: str = "") -> str:
+        if not qq_number:
+            return ""
+        payload = self._get_url_json(
+            "https://c.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg",
+            {
+                "cid": 205360838,
+                "userid": qq_number,
+                "reqfrom": 1,
+                "g_tk": 5381,
+                "loginUin": qq_number,
+                "hostUin": 0,
+                "format": "json",
+                "inCharset": "utf8",
+                "outCharset": "utf-8",
+                "notice": 0,
+                "platform": "yqq.json",
+                "needNewCode": 0,
+            },
+            {"Cookie": cookie} if cookie else None,
+        )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        creator = data.get("creator") if isinstance(data.get("creator"), dict) else {}
+        return str(creator.get("nick") or creator.get("nickname") or "").strip()
+
     def add_song_to_playlist(
         self,
         song_id: str,
@@ -2033,7 +2058,7 @@ def load_auth(platform: str | None = None) -> dict[str, str]:
     return auth
 
 
-def save_auth(qq_number: str, cookie: str, platform: str | None = None) -> None:
+def save_auth(qq_number: str, cookie: str, platform: str | None = None, nickname: str = "") -> None:
     platform = normalize_platform(platform or load_settings().get("platform", "qqmusic"))
     path = auth_file_path(platform)
     data = {
@@ -2042,6 +2067,9 @@ def save_auth(qq_number: str, cookie: str, platform: str | None = None) -> None:
         "platform": platform,
         "updated_at": str(int(time.time())),
     }
+    clean_nickname = nickname.strip()
+    if clean_nickname and clean_nickname not in {"微信登录"}:
+        data["nickname"] = clean_nickname
     try:
         with path.open("w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
@@ -2243,7 +2271,7 @@ def run_cli(args: argparse.Namespace) -> int:
             if not args.phone or not args.captcha:
                 raise QQMusicError("网易云登录请传入 --phone 和 --captcha，或先用 --send-captcha 发送验证码")
             result = api.login_with_phone_captcha(args.phone, args.captcha)
-            save_auth(result.qq_number, result.cookie, platform)
+            save_auth(result.qq_number, result.cookie, platform, result.nickname)
             print(f"登录成功: {result.nickname or result.qq_number}")
             return 0
 
@@ -2270,7 +2298,7 @@ def run_cli(args: argparse.Namespace) -> int:
             elif state == "expired":
                 raise QQMusicError("二维码已过期，请重新运行 login")
             elif state == "done" and result:
-                save_auth(result.qq_number, result.cookie, platform)
+                save_auth(result.qq_number, result.cookie, platform, result.nickname)
                 print(f"登录成功: {result.nickname or result.qq_number}")
                 return 0
             time.sleep(2)
@@ -2396,6 +2424,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     playback_started_at = 0.0
     paused_position_ms = 0
     progress_dragging = False
+    nickname_fetching = False
 
     root.columnconfigure(0, weight=1)
     root.rowconfigure(1, weight=1)
@@ -2775,10 +2804,58 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                     playlist_box.see(index)
                     break
 
+    def fetch_account_nickname() -> None:
+        nonlocal nickname_fetching
+        if nickname_fetching:
+            return
+        if auth.get("nickname") or not auth.get("qq_number") or not auth.get("cookie"):
+            return
+        nickname_fetching = True
+        target_platform = current_platform
+        target_account = auth.get("qq_number", "")
+        target_cookie = auth.get("cookie", "")
+        target_api = api
+
+        def worker() -> None:
+            nonlocal nickname_fetching
+            try:
+                if target_platform == "qqmusic":
+                    nickname = target_api.user_nickname(target_account, target_cookie)
+                elif target_platform == "netease":
+                    nickname = target_api.login_with_cookie(target_cookie).nickname
+                else:
+                    nickname = ""
+            except Exception:
+                root.after(0, lambda: reset_nickname_fetching())
+                return
+            if not nickname:
+                root.after(0, lambda: reset_nickname_fetching())
+                return
+
+            def update() -> None:
+                nonlocal nickname_fetching
+                nickname_fetching = False
+                if current_platform != target_platform or auth.get("qq_number") != target_account:
+                    return
+                auth["nickname"] = nickname
+                save_auth(target_account, target_cookie, target_platform, nickname)
+                refresh_account_label()
+
+            root.after(0, update)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def reset_nickname_fetching() -> None:
+        nonlocal nickname_fetching
+        nickname_fetching = False
+
     def refresh_account_label() -> None:
         qq_number = auth.get("qq_number")
         if qq_number:
-            account_var.set(f"{platform_display_name(current_platform)}已登录: {qq_number}")
+            display_name = auth.get("nickname") or auth.get("username") or qq_number
+            account_var.set(f"{platform_display_name(current_platform)}已登录: {display_name}")
+            if not auth.get("nickname"):
+                fetch_account_nickname()
             write_state = tk.NORMAL if supports_playlist_write() else tk.DISABLED
             new_playlist_button.configure(state=write_state)
             rename_playlist_button.configure(state=write_state)
@@ -3069,7 +3146,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
         window.grab_set()
 
     def finish_netease_login(result: QRLoginResult, *windows: tk.Toplevel) -> None:
-        save_auth(result.qq_number, result.cookie, current_platform)
+        save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
         auth.clear()
         auth.update(load_auth(current_platform))
         refresh_account_label()
@@ -3218,7 +3295,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             def worker() -> None:
                 try:
                     result = api.login_with_phone_captcha(phone, captcha, country_code)
-                    save_auth(result.qq_number, result.cookie, current_platform)
+                    save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
                 except Exception as exc:  # noqa: BLE001
                     message = str(exc)
                     root.after(0, lambda: (login_button.configure(state=tk.NORMAL), login_status_var.set("登录失败"), messagebox.showerror("登录失败", message, parent=window)))
@@ -3274,7 +3351,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
                 def worker() -> None:
                     try:
                         result = api.login_with_cookie(cookie)
-                        save_auth(result.qq_number, result.cookie, current_platform)
+                        save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
                     except Exception as exc:  # noqa: BLE001
                         message = str(exc)
                         root.after(0, lambda: (import_button.configure(state=tk.NORMAL), messagebox.showerror("导入失败", message, parent=cookie_window)))
@@ -3388,7 +3465,7 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
             qr_cancelled = True
             if qr_window and qr_window.winfo_exists():
                 qr_window.destroy()
-            save_auth(result.qq_number, result.cookie, current_platform)
+            save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
             auth.clear()
             auth.update(load_auth(current_platform))
             refresh_account_label()

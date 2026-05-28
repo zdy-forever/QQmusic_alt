@@ -7,6 +7,7 @@ const audio = $("audio");
 const state = {
   loggedIn: false,
   account: "",
+  displayName: "",
   playlists: [],
   currentPlaylist: null,
   songs: [],
@@ -80,7 +81,7 @@ function songCover(song, size = 150) {
 }
 
 function updateAccount() {
-  $("accountText").textContent = state.loggedIn ? `${state.platformName}已登录: ${state.account}` : `${state.platformName}未登录`;
+  $("accountText").textContent = state.loggedIn ? `${state.platformName}已登录: ${state.displayName || state.account}` : `${state.platformName}未登录`;
   $("accountButton").textContent = state.loggedIn ? "退出登录" : "登录";
   $("syncButton").disabled = !state.loggedIn;
   $("newPlaylistButton").disabled = !state.loggedIn;
@@ -179,6 +180,7 @@ async function init() {
     const data = await api("/api/state");
     state.loggedIn = data.logged_in;
     state.account = data.account || "";
+    state.displayName = data.display_name || state.account;
     state.platform = data.platform || state.settings.platform || "qqmusic";
     state.platformName = data.platform_name || platformLabel(state.platform);
     updateAccount();
@@ -231,6 +233,7 @@ async function switchPlatform(platform) {
   state.platformName = platformLabel(state.platform);
   state.loggedIn = false;
   state.account = "";
+  state.displayName = "";
   state.playlists = [];
   state.currentPlaylist = null;
   audio.pause();
@@ -239,6 +242,7 @@ async function switchPlatform(platform) {
   const stateData = await api("/api/state");
   state.loggedIn = stateData.logged_in;
   state.account = stateData.account || "";
+  state.displayName = stateData.display_name || state.account;
   state.platform = stateData.platform || state.platform;
   state.platformName = stateData.platform_name || platformLabel(state.platform);
   updateAccount();
@@ -477,6 +481,7 @@ async function startLogin(provider) {
           clearInterval(state.loginPoll);
           state.loggedIn = true;
           state.account = poll.account;
+          state.displayName = poll.display_name || poll.nickname || poll.account;
           closeModal("loginModal");
           updateAccount();
           await syncPlaylists();
@@ -501,6 +506,7 @@ async function logout() {
   await api("/api/logout", { method: "POST" });
   state.loggedIn = false;
   state.account = "";
+  state.displayName = "";
   state.playlists = [];
   state.currentPlaylist = null;
   renderPlaylists();
@@ -526,6 +532,7 @@ async function loginNeteasePhone() {
   const data = await api("/api/netease/login/phone", { method: "POST", body: { phone, captcha, country_code: countryCode } });
   state.loggedIn = true;
   state.account = data.account || "";
+  state.displayName = data.display_name || data.nickname || data.account || "";
   closeModal("loginModal");
   updateAccount();
   await syncPlaylists();
@@ -539,6 +546,7 @@ async function loginNeteaseCookie() {
   const data = await api("/api/netease/login/cookie", { method: "POST", body: { cookie } });
   state.loggedIn = true;
   state.account = data.account || "";
+  state.displayName = data.display_name || data.nickname || data.account || "";
   closeModal("loginModal");
   updateAccount();
   await syncPlaylists();
