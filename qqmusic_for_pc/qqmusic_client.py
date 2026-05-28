@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -2185,14 +2186,20 @@ class Player:
 
     def pause(self) -> bool:
         if self.backend == "python-vlc" and self._vlc_player is not None:
-            self._vlc_player.pause()
+            if hasattr(self._vlc_player, "set_pause"):
+                self._vlc_player.set_pause(True)
+            else:
+                self._vlc_player.pause()
             return True
         self.stop()
         return False
 
     def resume(self) -> bool:
         if self.backend == "python-vlc" and self._vlc_player is not None:
-            self._vlc_player.play()
+            if hasattr(self._vlc_player, "set_pause"):
+                self._vlc_player.set_pause(False)
+            else:
+                self._vlc_player.play()
             return True
         return False
 
@@ -2204,7 +2211,7 @@ class Player:
         if self.process and self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=2)
+                self.process.wait(timeout=0.3)
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process = None
@@ -4210,10 +4217,13 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
         user_stopped = True
         playback_started_at = 0.0
         paused_position_ms = 0
+        playing_song_key = ""
+        playing_duration_ms: int | None = None
         progress_dragging = False
         displayed_lyric_key = ""
         current_lyric_entries: list[tuple[int, str]] = []
         current_lyric_index = -1
+        lyric_request_token = 0
         pending_buffer_resume_ms: int | None = None
         last_song_click_index = -1
         last_song_click_at = 0.0
@@ -4222,8 +4232,11 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
         pending_cover_urls: dict[str, str] = {}
         playlist_fallback_cover_pending: set[str] = set()
         playlist_fallback_cover_done: set[str] = set()
+        playlist_song_cover_done: set[str] = set()
         playlist_fallback_cover_generation = 0
         cover_sync_running = False
+        ui_update_lock = threading.RLock()
+        last_song_list_update_at = 0.0
 
         bg = "#080b12"
         panel = "#111827"
@@ -4473,15 +4486,18 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             def worker() -> None:
                 nonlocal cover_sync_running
                 while pending_cover_urls:
-                    batch = dict(list(pending_cover_urls.items())[:24])
+                    batch_size = 2 if not user_stopped else 10
+                    batch = dict(list(pending_cover_urls.items())[:batch_size])
                     for key in batch:
                         pending_cover_urls.pop(key, None)
                     for key, url in batch.items():
                         cover_cache[key] = url
                         for control in cover_controls.get(key, []):
                             set_cover_image(control, url, str(getattr(control, "data", "") or "M"))
-                    safe_update()
-                    time.sleep(0.03)
+                    changed_controls = [control for key in batch for control in cover_controls.get(key, [])]
+                    if changed_controls:
+                        safe_update(*changed_controls)
+                    time.sleep(0.35 if not user_stopped else 0.08)
                 cover_sync_running = False
 
             page.run_thread(worker)
@@ -4549,19 +4565,56 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 if cover_url and generation == playlist_fallback_cover_generation:
                     playlist.cover = cover_url
                     set_cover_for_key(cover_key, cover_url)
-                    safe_update()
+                    safe_update(*cover_controls.get(cover_key, []))
 
             page.run_thread(worker)
 
-        def safe_update() -> None:
+        def safe_update(*controls: Any) -> None:
+            with ui_update_lock:
+                if controls:
+                    filtered = [control for control in controls if control is not None]
+                    if not filtered:
+                        return
+                    try:
+                        page.update(*filtered)
+                    except Exception:
+                        pass
+                    try:
+                        page.schedule_update()
+                    except Exception:
+                        pass
+                    return
+                try:
+                    page.update()
+                except Exception:
+                    pass
+                try:
+                    page.schedule_update()
+                except Exception:
+                    pass
+
+        def fast_update(*controls: Any) -> None:
+            filtered = [control for control in controls if control is not None]
+            if not filtered:
+                return
             try:
-                page.update()
+                page.update(*filtered)
+            except Exception:
+                pass
+            try:
+                page.schedule_update()
             except Exception:
                 pass
 
-        def set_status(message: str) -> None:
+        def update_player_bar() -> None:
+            try:
+                fast_update(player_bar)
+            except NameError:
+                fast_update(status_text, player_meta, play_button, elapsed_text, duration_text, progress_slider, lyric_preview_text)
+
+        def set_status(message: str, *extra_controls: Any) -> None:
             status_text.value = message
-            safe_update()
+            safe_update(status_text, *extra_controls)
 
         def show_message(title: str, message: str) -> None:
             dialog = ft.AlertDialog(
@@ -4619,6 +4672,8 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             duration = player.duration_ms()
             if duration:
                 return duration
+            if playing_duration_ms:
+                return playing_duration_ms
             if 0 <= current_song_index < len(songs):
                 song_duration = songs[current_song_index].duration
                 if song_duration:
@@ -4629,8 +4684,10 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             if user_stopped:
                 return paused_position_ms
             position = player.position_ms()
-            if position is None and playback_started_at:
-                position = int((time.monotonic() - playback_started_at) * 1000)
+            if playback_started_at:
+                estimated = int((time.monotonic() - playback_started_at) * 1000)
+                if position is None or estimated > position + 750:
+                    position = estimated
             duration = current_duration_ms()
             if position is not None and duration:
                 return min(position, duration)
@@ -4758,11 +4815,16 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
 
         def update_playlist_selection(previous: int, current: int) -> None:
             nonlocal selected_playlist_tile_index
+            controls_to_update = []
             if previous != current:
                 apply_playlist_tile_style(previous, False)
+                if 0 <= previous < len(playlist_list.controls):
+                    controls_to_update.append(playlist_list.controls[previous])
             apply_playlist_tile_style(current, True)
+            if 0 <= current < len(playlist_list.controls):
+                controls_to_update.append(playlist_list.controls[current])
             selected_playlist_tile_index = current
-            safe_update()
+            safe_update(*controls_to_update)
 
         def song_queue_display(song: Song) -> tuple[str, str]:
             meta_parts = []
@@ -4787,12 +4849,17 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
 
         def update_song_selection(previous: int, current: int) -> None:
             nonlocal selected_song_tile_index
+            controls_to_update = []
             if previous != current:
                 apply_song_tile_style(previous, False)
+                if 0 <= previous < len(song_list.controls):
+                    controls_to_update.append(song_list.controls[previous])
             apply_song_tile_style(current, True)
+            if 0 <= current < len(song_list.controls):
+                controls_to_update.append(song_list.controls[current])
             selected_song_tile_index = current
             queue_text.value = f"{current + 1 if current >= 0 else 0} / {len(songs)}"
-            safe_update()
+            safe_update(*controls_to_update, queue_text)
 
         def build_song_tile(index: int, song: Song) -> Any:
             title, meta = song_queue_display(song)
@@ -4829,20 +4896,31 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 song_list.controls.append(build_song_tile(index, song))
             selected_song_tile_index = current_song_index
             queue_text.value = f"{current_song_index + 1 if current_song_index >= 0 else 0} / {len(songs)}"
-            safe_update()
+            safe_update(song_list, queue_text)
             schedule_cover_sync()
 
         def append_song_items(results: list[Song]) -> None:
+            nonlocal last_song_list_update_at
             start = len(songs)
             songs.extend(results)
             for offset, song in enumerate(results):
                 song_list.controls.append(build_song_tile(start + offset, song))
             queue_text.value = f"{current_song_index + 1 if current_song_index >= 0 else 0} / {len(songs)}"
-            safe_update()
+            now = time.monotonic()
+            if user_stopped or now - last_song_list_update_at >= 2.0:
+                last_song_list_update_at = now
+                safe_update(song_list, queue_text)
+            else:
+                safe_update(queue_text)
             schedule_cover_sync()
 
         def song_identity(song: Song) -> str:
             return song.mid or song.song_id or song.local_path or song.title
+
+        def selected_song_key() -> str:
+            if 0 <= current_song_index < len(songs):
+                return song_identity(songs[current_song_index])
+            return ""
 
         def clear_lyric_preview() -> None:
             nonlocal displayed_lyric_key, current_lyric_entries, current_lyric_index
@@ -4869,21 +4947,30 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             current_lyric_index = index
             lyric_preview_text.value = current_lyric_entries[index][1] if index >= 0 else ""
 
-        def render_lyrics(raw_text: str, song_key: str = "") -> None:
+        def render_lyrics(raw_text: str, song_key: str = "", update_preview: bool = False, update_panel: bool = True) -> None:
             nonlocal displayed_lyric_key, current_lyric_entries, current_lyric_index
-            lyric_list.controls.clear()
             parsed = parse_lrc_lines(raw_text)
-            current_lyric_entries = parsed
-            current_lyric_index = -1
+            if update_preview:
+                current_lyric_entries = parsed
+                current_lyric_index = -1
             lines = [line for _time_ms, line in parsed] if parsed else (strip_lrc_timestamps(raw_text) or "没有返回歌词").splitlines()
-            for line in lines:
-                lyric_list.controls.append(ft.Text(line, color="#bfdbfe", size=14, selectable=True))
-            if song_key:
-                displayed_lyric_key = song_key
-            update_lyric_preview(current_position_ms(), force=True)
-            safe_update()
+            if update_panel:
+                lyric_list.controls.clear()
+                for line in lines:
+                    lyric_list.controls.append(ft.Text(line, color="#bfdbfe", size=14, selectable=True))
+                if song_key:
+                    displayed_lyric_key = song_key
+            if update_preview:
+                update_lyric_preview(current_position_ms(), force=True)
+            controls = []
+            if update_panel:
+                controls.append(lyric_list)
+            if update_preview:
+                controls.append(lyric_preview_text)
+            safe_update(*controls)
 
-        def show_song(song: Song, load_lyrics: bool = True) -> None:
+        def show_song(song: Song, load_lyrics: bool = True, for_playback: bool = False) -> None:
+            nonlocal lyric_request_token
             song_key = song_identity(song)
             parts = [
                 f"歌曲: {song.title}",
@@ -4896,22 +4983,39 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             if not load_lyrics:
                 if displayed_lyric_key != song_key:
                     lyric_list.controls[:] = [ft.Text("播放时加载歌词", color=muted)]
-                safe_update()
+                safe_update(song_info, lyric_list)
                 return
-            if displayed_lyric_key == song_key:
-                safe_update()
+            if displayed_lyric_key == song_key and not for_playback:
+                safe_update(song_info, lyric_list)
                 return
+            lyric_request_token += 1
+            request_token = lyric_request_token
             lyric_list.controls[:] = [ft.Text("正在加载歌词...", color=muted)]
-            safe_update()
+            safe_update(song_info, lyric_list)
 
             def worker() -> None:
                 try:
                     text_value = api.lyric(song.mid, auth.get("cookie", "")) or "没有返回歌词"
-                    render_lyrics(text_value, song_key)
+                    if for_playback:
+                        if playing_song_key != song_key:
+                            return
+                        render_lyrics(text_value, song_key, update_preview=True, update_panel=(selected_song_key() == song_key))
+                        return
+                    if request_token != lyric_request_token or selected_song_key() != song_key:
+                        return
+                    render_lyrics(text_value, song_key, update_preview=False, update_panel=True)
                 except Exception as exc:
-                    clear_lyric_preview()
+                    if for_playback:
+                        if playing_song_key != song_key:
+                            return
+                        current_lyric_entries.clear()
+                        lyric_preview_text.value = ""
+                        safe_update(lyric_preview_text)
+                        return
+                    if request_token != lyric_request_token or selected_song_key() != song_key:
+                        return
                     lyric_list.controls[:] = [ft.Text(str(exc), color=danger, selectable=True)]
-                    safe_update()
+                    safe_update(lyric_list)
 
             run_worker(worker)
 
@@ -4922,7 +5026,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             previous = current_song_index
             current_song_index = index
             update_song_selection(previous, index)
-            show_song(songs[index], load_lyrics=False)
+            show_song(songs[index], load_lyrics=True)
 
         def click_song(index: int) -> None:
             nonlocal last_song_click_index, last_song_click_at
@@ -4950,7 +5054,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 song_info.value = "没有歌曲"
                 lyric_list.controls.clear()
             refresh_song_list()
-            set_status(message)
+            set_status(message, song_info, lyric_list, lyric_preview_text)
 
         def append_songs(results: list[Song], message: str) -> None:
             if not results:
@@ -4959,16 +5063,18 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             append_song_items(results)
             set_status(message)
 
-        def update_playlist_cover_from_songs(playlist: Playlist, results: list[Song]) -> None:
-            if playlist.id == "__downloads__" or playlist_cover_url(playlist):
+        def update_playlist_cover_from_songs(playlist: Playlist, results: list[Song], force: bool = False) -> None:
+            cover_key = f"playlist:{current_platform}:{playlist.id}"
+            if playlist.id == "__downloads__" or cover_key in playlist_song_cover_done or (playlist_cover_url(playlist) and not force):
                 return
             for song in results:
                 cover_url = song_cover_url(song)
                 if cover_url:
                     playlist.cover = cover_url
-                    cover_key = f"playlist:{current_platform}:{playlist.id}"
+                    playlist_song_cover_done.add(cover_key)
+                    playlist_fallback_cover_done.add(cover_key)
                     set_cover_for_key(cover_key, cover_url)
-                    safe_update()
+                    safe_update(*cover_controls.get(cover_key, []))
                     return
 
         def clear_song_queue(message: str) -> None:
@@ -4989,7 +5095,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 )
             ]
             queue_text.value = "0 / 0"
-            set_status(message)
+            set_status(message, song_info, lyric_list, song_list, queue_text, lyric_preview_text)
 
         def search() -> None:
             nonlocal current_playlist, playlist_load_token
@@ -5255,6 +5361,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             playlist_fallback_cover_generation += 1
             playlist_fallback_cover_pending.clear()
             playlist_fallback_cover_done.clear()
+            playlist_song_cover_done.clear()
 
             def worker() -> None:
                 try:
@@ -5303,7 +5410,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 if load_token != playlist_load_token:
                     return
                 loaded = len(results)
-                update_playlist_cover_from_songs(playlist, results)
+                update_playlist_cover_from_songs(playlist, results, force=True)
                 replace_songs(results, f"{playlist_name}: 已加载 {loaded} / {total} 首")
 
                 while load_token == playlist_load_token:
@@ -5325,15 +5432,15 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                     total = max(total, page_total)
                     if not page_results:
                         break
-                    update_playlist_cover_from_songs(playlist, page_results)
+                    update_playlist_cover_from_songs(playlist, page_results, force=True)
 
                     chunk_start = 0
                     while chunk_start < len(page_results) and load_token == playlist_load_token:
-                        chunk = page_results[chunk_start : chunk_start + 100]
+                        chunk = page_results[chunk_start : chunk_start + 80]
                         loaded += len(chunk)
                         append_songs(chunk, f"{playlist_name}: 已加载 {min(loaded, total)} / {total} 首")
                         chunk_start += len(chunk)
-                        time.sleep(0.01)
+                        time.sleep(0.02)
                     if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE:
                         break
                     if loaded >= total:
@@ -5564,7 +5671,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 progress_slider.secondary_track_value = 100
                 play_button.content.value = "播放"
                 reset_hero_cover()
-                set_status("播放完成")
+                set_status("播放完成", player_meta, progress_slider, play_button, hero_cover)
                 return
             play_song_at(next_index)
 
@@ -5589,16 +5696,16 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             elapsed_text.value = format_milliseconds(position)
             set_progress_values(position, duration)
             update_lyric_preview(position)
-            safe_update()
+            update_player_bar()
 
-        def drive_playback_progress(token: int) -> None:
+        async def drive_playback_progress(token: int) -> None:
             while token == playback_token and not user_stopped:
                 refresh_playback_progress()
-                time.sleep(0.25)
+                await asyncio.sleep(0.2)
             refresh_playback_progress()
 
         def play_song_at(index: int, start_position_ms: int = 0) -> None:
-            nonlocal current_song_index, playback_token, user_stopped, playback_started_at, paused_position_ms, pending_buffer_resume_ms
+            nonlocal current_song_index, playback_token, user_stopped, playback_started_at, paused_position_ms, pending_buffer_resume_ms, playing_song_key, playing_duration_ms
             if not (0 <= index < len(songs)):
                 show_message("提示", "先选择一首歌")
                 return
@@ -5609,6 +5716,8 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             current_song_index = index
             user_stopped = False
             pending_buffer_resume_ms = None
+            playing_song_key = song_identity(song)
+            playing_duration_ms = song.duration * 1000 if song.duration else None
             paused_position_ms = max(0, int(start_position_ms))
             play_button.content.value = "暂停"
             player_title.value = song.title
@@ -5621,6 +5730,8 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             update_lyric_preview(paused_position_ms, force=True)
             show_song(song, load_lyrics=False)
             update_song_selection(previous_index, index)
+            safe_update(player_title, player_meta, hero_cover, play_button, elapsed_text, duration_text, progress_slider, lyric_preview_text)
+            page.run_task(drive_playback_progress, token)
 
             def worker() -> None:
                 nonlocal playback_started_at
@@ -5632,15 +5743,14 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 except Exception as exc:
                     play_button.content.value = "播放"
                     show_message("播放失败", str(exc))
-                    set_status("播放失败")
+                    set_status("播放失败", play_button, player_meta)
                     return
                 playback_started_at = time.monotonic() - (paused_position_ms / 1000)
                 player_meta.value = song.singers or song.album or "正在播放"
-                set_status("正在播放")
-                page.run_thread(lambda: drive_playback_progress(token))
+                status_text.value = "正在播放"
+                update_player_bar()
                 page.run_thread(lambda: monitor_playback(token))
-                if displayed_lyric_key != song_identity(song):
-                    show_song(song, load_lyrics=True)
+                show_song(song, load_lyrics=True, for_playback=True)
 
             run_worker(worker, "正在获取播放链接...")
 
@@ -5666,8 +5776,9 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             playback_started_at = time.monotonic() - (paused_position_ms / 1000)
             play_button.content.value = "暂停"
             player_meta.value = "继续"
-            set_status("继续")
-            page.run_thread(lambda: drive_playback_progress(token))
+            status_text.value = "继续"
+            update_player_bar()
+            page.run_task(drive_playback_progress, token)
             page.run_thread(lambda: monitor_playback(token))
 
         def play_previous() -> None:
@@ -5700,7 +5811,8 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             duration = current_duration_ms()
             set_progress_values(paused_position_ms, duration)
             update_lyric_preview(paused_position_ms)
-            set_status("已暂停")
+            status_text.value = "已暂停"
+            update_player_bar()
 
         def toggle_play_pause() -> None:
             if user_stopped:
@@ -5752,7 +5864,7 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             elapsed_text.value = format_milliseconds(position)
             progress_slider.label = format_milliseconds(position)
             update_lyric_preview(position, force=True)
-            safe_update()
+            safe_update(elapsed_text, progress_slider, lyric_preview_text)
 
         def wait_for_buffer_then_resume(token: int, target_position_ms: int) -> None:
             nonlocal playback_started_at, user_stopped, pending_buffer_resume_ms
@@ -5765,13 +5877,13 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                     user_stopped = False
                     pending_buffer_resume_ms = None
                     play_button.content.value = "暂停"
-                    set_status("正在播放")
-                    page.run_thread(lambda: drive_playback_progress(token))
+                    set_status("正在播放", play_button, elapsed_text, duration_text, progress_slider, lyric_preview_text)
+                    page.run_task(drive_playback_progress, token)
                     page.run_thread(lambda: monitor_playback(token))
                     return
                 elapsed_text.value = format_milliseconds(target_position_ms)
                 set_progress_values(target_position_ms, current_duration_ms())
-                safe_update()
+                safe_update(elapsed_text, duration_text, progress_slider)
                 time.sleep(0.3)
 
         def finish_progress_drag(event: object | None = None) -> None:
@@ -5797,16 +5909,17 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                 elapsed_text.value = format_milliseconds(position)
                 set_progress_values(position, duration)
                 update_lyric_preview(position, force=True)
-                set_status("等待缓冲")
+                set_status("等待缓冲", play_button, player_meta, elapsed_text, duration_text, progress_slider, lyric_preview_text)
                 page.run_thread(lambda: wait_for_buffer_then_resume(token, position))
             elif player.seek_ms(position):
                 playback_started_at = time.monotonic() - (position / 1000)
                 elapsed_text.value = format_milliseconds(position)
                 set_progress_values(position, duration)
                 update_lyric_preview(position, force=True)
+                safe_update(elapsed_text, duration_text, progress_slider, lyric_preview_text)
             else:
                 player_meta.value = "当前播放器不支持拖动进度"
-            safe_update()
+                safe_update(player_meta)
 
         def open_settings() -> None:
             show_singers = ft.Checkbox(label="显示歌手", value=bool(settings.get("queue_show_singers", True)))
