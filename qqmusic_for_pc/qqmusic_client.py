@@ -2303,21 +2303,79 @@ def build_music_api(platform: str, api_base: str = DEFAULT_API_BASE, timeout: in
     return QQMusicAPI(base_url=api_base, timeout=timeout)
 
 
+def run_netease_web_login_helper(timeout_seconds: int = 300) -> int:
+    try:
+        from PySide6.QtCore import QTimer, QUrl
+        from PySide6.QtWebEngineCore import QWebEngineProfile
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWidgets import QApplication
+    except Exception as exc:  # noqa: BLE001 - optional GUI helper.
+        print(f"ERROR: 无法启动内嵌浏览器: {exc}", file=sys.stderr)
+        return 2
+
+    app = QApplication.instance() or QApplication([])
+    cookies: dict[str, str] = {}
+    finished = {"value": False}
+
+    def cookie_to_text(cookie: Any) -> tuple[str, str]:
+        name = bytes(cookie.name()).decode("utf-8", "ignore")
+        value = bytes(cookie.value()).decode("utf-8", "ignore")
+        return name, value
+
+    def finish(success: bool, message: str = "") -> None:
+        if finished["value"]:
+            return
+        finished["value"] = True
+        if success:
+            cookie_text = "; ".join(f"{name}={value}" for name, value in cookies.items() if value)
+            print(cookie_text, flush=True)
+        elif message:
+            print(f"ERROR: {message}", file=sys.stderr, flush=True)
+        app.quit()
+
+    profile = QWebEngineProfile.defaultProfile()
+    store = profile.cookieStore()
+
+    def on_cookie_added(cookie: Any) -> None:
+        domain = str(cookie.domain() or "")
+        if "163.com" not in domain:
+            return
+        name, value = cookie_to_text(cookie)
+        if name and value:
+            cookies[name] = value
+        if cookies.get("MUSIC_U"):
+            QTimer.singleShot(800, lambda: finish(True))
+
+    store.cookieAdded.connect(on_cookie_added)
+    view = QWebEngineView()
+    view.setWindowTitle("网易云音乐网页登录")
+    view.resize(1040, 760)
+    view.load(QUrl("https://music.163.com/#/login"))
+    view.show()
+
+    QTimer.singleShot(max(30, int(timeout_seconds)) * 1000, lambda: finish(False, "登录超时"))
+    return int(app.exec())
+
+
 def run_cli(args: argparse.Namespace) -> int:
     platform = normalize_platform(args.platform)
     api = build_music_api(platform, args.api_base, args.timeout)
 
+    if args.command == "_netease-web-login":
+        return run_netease_web_login_helper(args.timeout_seconds)
+
     if args.command == "login":
         if platform == "netease":
-            if args.send_captcha:
-                if not args.phone:
-                    raise QQMusicError("请用 --phone 传入手机号")
-                api.send_phone_captcha(args.phone)
-                print("验证码已发送")
-                return 0
-            if not args.phone or not args.captcha:
-                raise QQMusicError("网易云登录请传入 --phone 和 --captcha，或先用 --send-captcha 发送验证码")
-            result = api.login_with_phone_captcha(args.phone, args.captcha)
+            helper = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--platform", "netease", "_netease-web-login", "--timeout-seconds", str(args.timeout_seconds)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if helper.returncode != 0:
+                raise QQMusicError((helper.stderr or helper.stdout or "网易云网页登录失败").strip())
+            cookie = helper.stdout.strip().splitlines()[-1] if helper.stdout.strip() else ""
+            result = api.login_with_cookie(cookie)
             save_auth(result.qq_number, result.cookie, platform, result.nickname)
             print(f"登录成功: {result.nickname or result.qq_number}")
             return 0
@@ -3168,9 +3226,42 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
 
     def start_login_action() -> None:
         if current_platform == "netease":
-            choose_netease_login_method()
+            netease_web_login()
         else:
             choose_login_method()
+
+    def netease_web_login() -> None:
+        set_busy(True, "正在等待网易云网页登录...")
+
+        def worker() -> None:
+            helper = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--platform",
+                    "netease",
+                    "_netease-web-login",
+                    "--timeout-seconds",
+                    "300",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if helper.returncode != 0:
+                message = (helper.stderr or helper.stdout or "网易云网页登录失败").strip()
+                root.after(0, lambda: (set_busy(False, "登录失败"), messagebox.showerror("登录失败", message, parent=root)))
+                return
+            cookie = helper.stdout.strip().splitlines()[-1] if helper.stdout.strip() else ""
+            try:
+                result = api.login_with_cookie(cookie)
+            except Exception as exc:  # noqa: BLE001
+                message = str(exc)
+                root.after(0, lambda: (set_busy(False, "登录失败"), messagebox.showerror("登录失败", message, parent=root)))
+                return
+            root.after(0, lambda: finish_netease_login(result))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def choose_netease_login_method() -> None:
         window = tk.Toplevel(root)
@@ -5247,42 +5338,38 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
             run_worker(worker, f"正在获取{provider_name}登录二维码...")
 
         def show_netease_login_dialog() -> None:
-            phone = ft.TextField(label="手机号", width=260)
-            country = ft.TextField(label="区号", value="86", width=90)
-            captcha = ft.TextField(label="短信验证码", width=180)
-            status = ft.Text("", color=muted)
-            captcha_sent = {"value": False}
+            status = ft.Text("将打开网易云官方登录页。登录完成后客户端会自动读取登录 Cookie。", color=muted)
+            started = {"value": False}
 
-            def send(_event: object | None = None) -> None:
-                phone_value = phone.value.strip()
-                country_value = country.value.strip() or "86"
-                if not phone_value:
-                    status.value = "请输入手机号"
-                    safe_update()
+            def start_web_login(_event: object | None = None) -> None:
+                if started["value"]:
                     return
+                started["value"] = True
+                status.value = "已打开内嵌浏览器，请在官方页面完成登录..."
+                safe_update()
 
                 def worker() -> None:
-                    try:
-                        api.send_phone_captcha(phone_value, country_value)
-                    except Exception as exc:
-                        status.value = str(exc)
+                    helper = subprocess.run(
+                        [
+                            sys.executable,
+                            str(Path(__file__).resolve()),
+                            "--platform",
+                            "netease",
+                            "_netease-web-login",
+                            "--timeout-seconds",
+                            "300",
+                        ],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    if helper.returncode != 0:
+                        status.value = (helper.stderr or helper.stdout or "网页登录失败").strip()
                         safe_update()
                         return
-                    captcha_sent["value"] = True
-                    status.value = "验证码已发送，请输入短信里的完整数字验证码"
-                    safe_update()
-
-                run_worker(worker, "正在发送验证码...")
-
-            def submit(_event: object | None = None) -> None:
-                if not captcha_sent["value"]:
-                    status.value = "请先发送验证码"
-                    safe_update()
-                    return
-
-                def worker() -> None:
+                    cookie = helper.stdout.strip().splitlines()[-1] if helper.stdout.strip() else ""
                     try:
-                        result = api.login_with_phone_captcha(phone.value.strip(), captcha.value.strip(), country.value.strip() or "86")
+                        result = api.login_with_cookie(cookie)
                         save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
                     except Exception as exc:
                         status.value = str(exc)
@@ -5295,47 +5382,20 @@ def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int
                     set_status(f"已登录: {result.nickname or result.qq_number}")
                     sync_playlists()
 
-                run_worker(worker, "正在登录...")
-
-            def import_cookie(_event: object | None = None) -> None:
-                page.pop_dialog()
-                safe_update()
-                ask_text("导入网易云 Cookie", "粘贴官方网页版 Cookie，至少包含 MUSIC_U", multiline=True, on_submit=submit_cookie_login)
+                run_worker(worker, "正在等待网易云网页登录...")
 
             page.show_dialog(
                 ft.AlertDialog(
                     modal=True,
                     title=ft.Text("网易云音乐登录"),
-                    content=ft.Column([ft.Row([country, phone]), captcha, status], tight=True),
+                    content=ft.Column([status], tight=True),
                     actions=[
-                        ft.TextButton("发送验证码", on_click=send),
-                        ft.TextButton("导入Cookie", on_click=import_cookie),
                         ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update())),
-                        ft.TextButton("登录", on_click=submit),
+                        ft.TextButton("打开官方登录页", on_click=start_web_login),
                     ],
                 )
             )
             safe_update()
-
-        def submit_cookie_login(cookie: str) -> None:
-            if not cookie:
-                show_message("提示", "请先粘贴 Cookie")
-                return
-
-            def worker() -> None:
-                try:
-                    result = api.login_with_cookie(cookie)
-                    save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
-                except Exception as exc:
-                    show_message("导入失败", str(exc))
-                    return
-                auth.clear()
-                auth.update(load_auth(current_platform))
-                refresh_account_label()
-                set_status(f"已登录: {result.nickname or result.qq_number}")
-                sync_playlists()
-
-            run_worker(worker, "正在导入 Cookie...")
 
         def logout() -> None:
             nonlocal displayed_lyric_key, playlist_load_token, playlist_fallback_cover_generation
@@ -6154,9 +6214,9 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("qq_number", nargs="?", help="仅 --cookie 调试模式需要；普通登录不用填写")
     login_parser.add_argument("--cookie", help="调试用：直接保存 QQ 音乐网页登录 Cookie")
     login_parser.add_argument("--timeout-seconds", type=int, default=180, help="扫码登录超时时间")
-    login_parser.add_argument("--phone", help="网易云手机号登录使用")
-    login_parser.add_argument("--captcha", help="网易云短信验证码")
-    login_parser.add_argument("--send-captcha", action="store_true", help="网易云发送短信验证码")
+
+    web_login_parser = subparsers.add_parser("_netease-web-login", help=argparse.SUPPRESS)
+    web_login_parser.add_argument("--timeout-seconds", type=int, default=300)
 
     subparsers.add_parser("logout", help="删除本地登录信息")
 
