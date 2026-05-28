@@ -8,6 +8,7 @@ paid, region-locked, DRM-protected, or account-only content.
 from __future__ import annotations
 
 import argparse
+import atexit
 import base64
 import binascii
 import hashlib
@@ -941,7 +942,7 @@ class QQMusicAPI:
     def playlist_songs(self, playlist_id: str, cookie: str = "") -> tuple[str, list[Song]]:
         name, results, total = self.playlist_songs_page(playlist_id, cookie, 0, PLAYLIST_BACKGROUND_PAGE_SIZE)
         loaded = len(results)
-        while loaded < total:
+        while True:
             page_name, page_results, page_total = self.playlist_songs_page(playlist_id, cookie, loaded, PLAYLIST_BACKGROUND_PAGE_SIZE)
             if page_name:
                 name = page_name
@@ -951,8 +952,10 @@ class QQMusicAPI:
                 break
             results.extend(page_results)
             loaded += len(page_results)
-            if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE and loaded >= page_total:
+            if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE:
                 break
+            if loaded >= total:
+                total = loaded + PLAYLIST_BACKGROUND_PAGE_SIZE
         return name, results
 
     def user_playlists(self, qq_number: str, cookie: str = "") -> list[Playlist]:
@@ -1676,7 +1679,23 @@ class NeteaseMusicAPI:
         return name, songs, max(total_count, begin + len(songs))
 
     def playlist_songs(self, playlist_id: str, cookie: str = "") -> tuple[str, list[Song]]:
-        return self.playlist_songs_page(playlist_id, cookie, 0, PLAYLIST_BACKGROUND_PAGE_SIZE)[:2]
+        name, results, total = self.playlist_songs_page(playlist_id, cookie, 0, PLAYLIST_BACKGROUND_PAGE_SIZE)
+        loaded = len(results)
+        while True:
+            page_name, page_results, page_total = self.playlist_songs_page(playlist_id, cookie, loaded, PLAYLIST_BACKGROUND_PAGE_SIZE)
+            if page_name:
+                name = page_name
+            if page_total > total:
+                total = page_total
+            if not page_results:
+                break
+            results.extend(page_results)
+            loaded += len(page_results)
+            if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE:
+                break
+            if loaded >= total:
+                total = loaded + PLAYLIST_BACKGROUND_PAGE_SIZE
+        return name, results
 
     def user_playlists(self, user_id: str, cookie: str = "") -> list[Playlist]:
         payload = self._get_json(
@@ -2210,9 +2229,30 @@ class Player:
             return int(value) if value is not None and value > 0 else None
         return None
 
+    def buffered_ms(self) -> int | None:
+        if self.backend == "python-vlc" and self._vlc_player is not None:
+            duration = self.duration_ms()
+            position = self.position_ms()
+            is_seekable = False
+            try:
+                is_seekable = bool(self._vlc_player.is_seekable())
+            except Exception:
+                is_seekable = False
+            if is_seekable and duration:
+                return duration
+            return position if duration and position and position >= duration else None
+        return None
+
     def seek_ms(self, position_ms: int) -> bool:
         if self.backend == "python-vlc" and self._vlc_player is not None:
-            self._vlc_player.set_time(max(0, int(position_ms)))
+            target = max(0, int(position_ms))
+            self._vlc_player.set_time(target)
+            duration = self.duration_ms()
+            if duration:
+                try:
+                    self._vlc_player.set_position(max(0.0, min(1.0, target / duration)))
+                except Exception:
+                    pass
             return True
         return False
 
@@ -4145,6 +4185,1844 @@ def run_gui(api_base: str, timeout: int, player_command: str | None) -> int:
     return 0
 
 
+def run_flet_gui(api_base: str, timeout: int, player_command: str | None) -> int:
+    try:
+        import flet as ft
+    except ImportError as exc:
+        raise QQMusicError("当前 Python 没有安装 Flet，请在 common 环境里运行或安装：uv pip install flet flet-desktop；旧界面请运行 qqmusic_client_old_ui.py") from exc
+
+    def app(page: Any) -> None:
+        settings = load_settings()
+        current_platform = normalize_platform(str(settings.get("platform", "qqmusic")))
+        api = build_music_api(current_platform, api_base, timeout)
+        player = Player(player_command)
+        atexit.register(player.stop)
+        auth = load_auth(current_platform)
+        songs: list[Song] = []
+        playlists: list[Playlist] = []
+        remote_playlists: list[Playlist] = []
+        current_playlist: Playlist | None = None
+        current_song_index = -1
+        selected_playlist_tile_index = -1
+        selected_song_tile_index = -1
+        playlist_load_token = 0
+        playback_token = 0
+        user_stopped = True
+        playback_started_at = 0.0
+        paused_position_ms = 0
+        progress_dragging = False
+        displayed_lyric_key = ""
+        current_lyric_entries: list[tuple[int, str]] = []
+        current_lyric_index = -1
+        pending_buffer_resume_ms: int | None = None
+        last_song_click_index = -1
+        last_song_click_at = 0.0
+        cover_cache: dict[str, str] = {}
+        cover_controls: dict[str, list[Any]] = {}
+        pending_cover_urls: dict[str, str] = {}
+        playlist_fallback_cover_pending: set[str] = set()
+        playlist_fallback_cover_done: set[str] = set()
+        playlist_fallback_cover_generation = 0
+        cover_sync_running = False
+
+        bg = "#080b12"
+        panel = "#111827"
+        panel_soft = "#0f172a"
+        line = "#243244"
+        text = "#f8fafc"
+        muted = "#9aa8bb"
+        accent = "#22c55e"
+        accent_2 = "#38bdf8"
+        danger = "#fb7185"
+
+        def border_all(color: str, width: int = 1) -> Any:
+            side = ft.BorderSide(width, color)
+            return ft.Border(top=side, right=side, bottom=side, left=side)
+
+        page.title = f"{platform_display_name(current_platform)} music_for_all_system(developed_by_Linux_Mint)"
+        page.bgcolor = bg
+        page.padding = 0
+        page.theme_mode = ft.ThemeMode.DARK
+        try:
+            page.window.width = 1180
+            page.window.height = 760
+            page.window.min_width = 980
+            page.window.min_height = 620
+        except Exception:
+            pass
+
+        def option(value: str, label: str) -> Any:
+            return ft.dropdown.Option(key=value, text=label)
+
+        QUALITY_LABELS = {
+            "128": "标准音质",
+            "320": "高音质",
+            "flac": "无损音质",
+        }
+
+        keyword_field = ft.TextField(
+            hint_text="搜索歌曲、歌手或专辑",
+            expand=True,
+            height=52,
+            border_radius=8,
+            bgcolor="#020617",
+            border_color=line,
+            focused_border_color=accent,
+            color=text,
+            text_size=16,
+            content_padding=ft.Padding(14, 12, 14, 12),
+            on_submit=lambda _event: search(),
+        )
+        platform_dropdown = ft.Dropdown(
+            value=current_platform,
+            options=[option(key, label) for key, label in PLATFORMS.items()],
+            width=164,
+            height=52,
+            border_radius=8,
+            bgcolor="#020617",
+            border_color=line,
+            focused_border_color=accent_2,
+            color=text,
+            text_size=16,
+            content_padding=ft.Padding(14, 12, 8, 12),
+            on_select=lambda _event: switch_platform(str(platform_dropdown.value)),
+        )
+        quality_dropdown = ft.Dropdown(
+            value=str(settings.get("quality", "320")),
+            options=[option(key, label) for key, label in QUALITY_LABELS.items()],
+            width=150,
+            height=52,
+            border_radius=8,
+            bgcolor="#020617",
+            border_color=line,
+            color=text,
+            text_size=16,
+            content_padding=ft.Padding(14, 12, 8, 12),
+            on_select=lambda _event: save_quality(),
+        )
+        play_mode_dropdown = ft.Dropdown(
+            value=str(settings.get("play_mode", "顺序播放")),
+            options=[option("顺序播放", "顺序播放"), option("随机播放", "随机播放"), option("单曲循环", "单曲循环")],
+            width=188,
+            height=52,
+            border_radius=8,
+            bgcolor="#020617",
+            border_color=line,
+            color=text,
+            text_size=16,
+            content_padding=ft.Padding(14, 12, 8, 12),
+            on_select=lambda _event: save_play_mode(),
+        )
+
+        status_text = ft.Text("", color=muted, size=12, width=150, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        lyric_preview_text = ft.Text("", color="#dbeafe", size=13, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, expand=True)
+        account_text = ft.Text("", color=accent, size=14, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        playlist_list = ft.ListView(expand=True, spacing=8, padding=ft.Padding(0, 0, 4, 0), auto_scroll=False)
+        song_list = ft.ListView(expand=True, spacing=8, padding=10, auto_scroll=False)
+        song_info = ft.Text("搜索歌曲后选择一项", color=muted, size=14, selectable=True)
+        lyric_list = ft.ListView(expand=True, spacing=8, padding=ft.Padding(0, 8, 0, 0), auto_scroll=False)
+        player_title = ft.Text("未播放", color=text, size=24, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        player_meta = ft.Text("选择歌曲后点击播放", color=muted, size=13, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS)
+        queue_text = ft.Text("0 / 0", color=muted, size=13)
+        hero_cover = ft.Container(
+            width=120,
+            height=120,
+            border_radius=8,
+            bgcolor="#0f172a",
+            border=border_all(line),
+            alignment=ft.Alignment(0, 0),
+            content=ft.Icon(ft.Icons.MUSIC_NOTE, color="#ffffff", size=54),
+        )
+        elapsed_text = ft.Text("0:00", color=muted, size=12, width=44)
+        duration_text = ft.Text("0:00", color=muted, size=12, width=44, text_align=ft.TextAlign.RIGHT)
+        progress_slider = ft.Slider(
+            min=0,
+            max=100,
+            value=0,
+            width=520,
+            active_color=accent,
+            secondary_active_color="#3b82f6",
+            inactive_color=line,
+            secondary_track_value=0,
+            on_change_start=lambda _event: begin_progress_drag(),
+            on_change=lambda event: preview_progress_drag(event),
+            on_change_end=lambda event: finish_progress_drag(event),
+        )
+
+        def clamp(value: float, minimum: float, maximum: float) -> float:
+            return max(minimum, min(maximum, value))
+
+        def resize_progress(_event: object | None = None) -> None:
+            page_width = float(getattr(page, "width", 1180) or 1180)
+            progress_slider.width = clamp(page_width - 760, 360, 760)
+            safe_update()
+
+        def button(label: str, handler: Any, primary: bool = False, danger_button: bool = False) -> Any:
+            return ft.Button(
+                ft.Text(label, size=16, no_wrap=True, text_align=ft.TextAlign.CENTER),
+                on_click=lambda _event: handler(),
+                bgcolor=accent if primary else "#1e293b",
+                color="#04100a" if primary else ("#fecdd3" if danger_button else text),
+                elevation=0,
+                height=46,
+            )
+
+        search_button = button("搜索", lambda: search(), primary=True)
+        settings_button = button("设置", lambda: open_settings())
+        new_playlist_button = button("新建歌单", lambda: create_playlist_action())
+        rename_playlist_button = button("改名歌单", lambda: rename_playlist_action())
+        delete_playlist_button = button("删除歌单", lambda: delete_playlist_action(), danger_button=True)
+        add_song_button = button("加入歌单", lambda: add_song_to_playlist_action())
+        remove_song_button = button("移除", lambda: remove_song_from_playlist_action(), danger_button=True)
+        download_song_button = button("下载", lambda: download_song_action())
+        prev_button = button("上一首", lambda: play_previous())
+        play_button = button("播放", lambda: toggle_play_pause(), primary=True)
+        next_button = button("下一首", lambda: play_next())
+
+        def card(content: Any, expand: Any = None, padding: int = 16) -> Any:
+            return ft.Container(
+                content=content,
+                expand=expand,
+                padding=padding,
+                bgcolor=panel,
+                border=border_all(line),
+                border_radius=8,
+            )
+
+        def clean_image_url(url: str) -> str:
+            url = (url or "").strip()
+            if url.startswith("//"):
+                return f"https:{url}"
+            return url
+
+        def first_string(*values: Any) -> str:
+            for value in values:
+                if value:
+                    return str(value)
+            return ""
+
+        def qq_album_cover(album_mid: str) -> str:
+            album_mid = album_mid.strip()
+            if not album_mid:
+                return ""
+            return f"https://y.gtimg.cn/music/photo_new/T002R300x300M000{album_mid}.jpg"
+
+        def song_cover_url(song: Song) -> str:
+            raw = song.raw or {}
+            direct = first_string(raw.get("picUrl"), raw.get("picurl"), raw.get("cover"), raw.get("coverUrl"), raw.get("imgurl"))
+            if direct:
+                return clean_image_url(direct)
+            album_value = raw.get("al") or raw.get("album") or {}
+            if isinstance(album_value, dict):
+                direct = first_string(album_value.get("picUrl"), album_value.get("picurl"), album_value.get("cover"), album_value.get("coverUrl"))
+                if direct:
+                    return clean_image_url(direct)
+                album_mid = first_string(album_value.get("pmid"), album_value.get("mid"), album_value.get("albummid"))
+                if album_mid:
+                    return qq_album_cover(album_mid)
+            album_mid = first_string(raw.get("albummid"), raw.get("albumMid"), raw.get("album_mid"), raw.get("pmid"))
+            if album_mid:
+                return qq_album_cover(album_mid)
+            return ""
+
+        def playlist_cover_url(playlist: Playlist) -> str:
+            return clean_image_url(playlist.cover)
+
+        def cover_placeholder(label: str) -> Any:
+            return ft.Icon(ft.Icons.MUSIC_NOTE, color="#ffffff", size=24)
+
+        def reset_hero_cover() -> None:
+            hero_cover.bgcolor = "#0f172a"
+            hero_cover.border = border_all(line)
+            hero_cover.content = ft.Icon(ft.Icons.MUSIC_NOTE, color="#ffffff", size=54)
+
+        def set_cover_image(control: Any, url: str, label: str) -> None:
+            control.bgcolor = "#020617"
+            control.border = None
+            control.content = ft.Image(
+                src=url,
+                width=42,
+                height=42,
+                fit=ft.BoxFit.COVER,
+                border_radius=8,
+                error_content=cover_placeholder(label),
+            )
+
+        def set_hero_cover(url: str = "") -> None:
+            url = clean_image_url(url)
+            if not url:
+                reset_hero_cover()
+                return
+            hero_cover.bgcolor = "#020617"
+            hero_cover.border = None
+            hero_cover.content = ft.Image(
+                src=url,
+                width=120,
+                height=120,
+                fit=ft.BoxFit.COVER,
+                border_radius=8,
+                error_content=ft.Icon(ft.Icons.MUSIC_NOTE, color="#ffffff", size=54),
+            )
+
+        def schedule_cover_sync() -> None:
+            nonlocal cover_sync_running
+            if cover_sync_running or not pending_cover_urls:
+                return
+            cover_sync_running = True
+
+            def worker() -> None:
+                nonlocal cover_sync_running
+                while pending_cover_urls:
+                    batch = dict(list(pending_cover_urls.items())[:24])
+                    for key in batch:
+                        pending_cover_urls.pop(key, None)
+                    for key, url in batch.items():
+                        cover_cache[key] = url
+                        for control in cover_controls.get(key, []):
+                            set_cover_image(control, url, str(getattr(control, "data", "") or "M"))
+                    safe_update()
+                    time.sleep(0.03)
+                cover_sync_running = False
+
+            page.run_thread(worker)
+
+        def mini_cover(label: str = "M", cover_key: str = "", cover_url: str = "") -> Any:
+            cover_key = cover_key or label
+            cover_url = clean_image_url(cover_url)
+            cover_controls.setdefault(cover_key, [])
+            control = ft.Container(
+                width=42,
+                height=42,
+                border_radius=8,
+                bgcolor="#0f172a",
+                border=border_all(line),
+                alignment=ft.Alignment(0, 0),
+                content=cover_placeholder(label),
+                data=label,
+            )
+            cover_controls[cover_key].append(control)
+            if cover_url:
+                cached_url = cover_cache.get(cover_key)
+                if cached_url:
+                    set_cover_image(control, cached_url, label)
+                else:
+                    pending_cover_urls[cover_key] = cover_url
+            return control
+
+        def set_cover_for_key(cover_key: str, cover_url: str) -> None:
+            cover_url = clean_image_url(cover_url)
+            if not cover_url:
+                return
+            cover_cache[cover_key] = cover_url
+            pending_cover_urls.pop(cover_key, None)
+            for control in cover_controls.get(cover_key, []):
+                set_cover_image(control, cover_url, str(getattr(control, "data", "") or "M"))
+
+        def find_first_song_cover(playlist: Playlist, generation: int) -> str:
+            offset = 0
+            page_size = PLAYLIST_INITIAL_PAGE_SIZE
+            while generation == playlist_fallback_cover_generation:
+                _name, page_songs, total = api.playlist_songs_page(playlist.id, auth.get("cookie", ""), offset, page_size)
+                for song in page_songs:
+                    cover_url = song_cover_url(song)
+                    if cover_url:
+                        return cover_url
+                offset += len(page_songs)
+                if not page_songs or (len(page_songs) < page_size and offset >= total):
+                    return ""
+                page_size = PLAYLIST_BACKGROUND_PAGE_SIZE
+            return ""
+
+        def schedule_playlist_fallback_cover(playlist: Playlist, cover_key: str) -> None:
+            if playlist.id == "__downloads__" or playlist_cover_url(playlist) or cover_key in playlist_fallback_cover_done or cover_key in playlist_fallback_cover_pending:
+                return
+            playlist_fallback_cover_pending.add(cover_key)
+            generation = playlist_fallback_cover_generation
+
+            def worker() -> None:
+                try:
+                    cover_url = find_first_song_cover(playlist, generation)
+                except Exception:
+                    cover_url = ""
+                playlist_fallback_cover_pending.discard(cover_key)
+                playlist_fallback_cover_done.add(cover_key)
+                if cover_url and generation == playlist_fallback_cover_generation:
+                    playlist.cover = cover_url
+                    set_cover_for_key(cover_key, cover_url)
+                    safe_update()
+
+            page.run_thread(worker)
+
+        def safe_update() -> None:
+            try:
+                page.update()
+            except Exception:
+                pass
+
+        def set_status(message: str) -> None:
+            status_text.value = message
+            safe_update()
+
+        def show_message(title: str, message: str) -> None:
+            dialog = ft.AlertDialog(
+                modal=True,
+                title=ft.Text(title),
+                content=ft.Text(message, selectable=True),
+                actions=[ft.TextButton("确定", on_click=lambda _event: (page.pop_dialog(), safe_update()))],
+            )
+            page.show_dialog(dialog)
+            safe_update()
+
+        def ask_text(title: str, label: str, initial: str = "", multiline: bool = False, on_submit: Any | None = None) -> None:
+            field = ft.TextField(value=initial, label=label, multiline=multiline, min_lines=5 if multiline else None, max_lines=8 if multiline else 1)
+
+            def submit(_event: object | None = None) -> None:
+                value = field.value.strip()
+                page.pop_dialog()
+                safe_update()
+                if on_submit:
+                    on_submit(value)
+
+            page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text(title),
+                    content=field,
+                    actions=[
+                        ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update())),
+                        ft.TextButton("确定", on_click=submit),
+                    ],
+                )
+            )
+            safe_update()
+
+        def confirm(title: str, message: str, on_yes: Any) -> None:
+            page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text(title),
+                    content=ft.Text(message),
+                    actions=[
+                        ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update())),
+                        ft.TextButton("确定", on_click=lambda _event: (page.pop_dialog(), safe_update(), on_yes())),
+                    ],
+                )
+            )
+            safe_update()
+
+        def run_worker(work: Any, busy_message: str = "") -> None:
+            if busy_message:
+                set_status(busy_message)
+            page.run_thread(work)
+
+        def current_duration_ms() -> int | None:
+            duration = player.duration_ms()
+            if duration:
+                return duration
+            if 0 <= current_song_index < len(songs):
+                song_duration = songs[current_song_index].duration
+                if song_duration:
+                    return int(song_duration) * 1000
+            return None
+
+        def current_position_ms() -> int | None:
+            if user_stopped:
+                return paused_position_ms
+            position = player.position_ms()
+            if position is None and playback_started_at:
+                position = int((time.monotonic() - playback_started_at) * 1000)
+            duration = current_duration_ms()
+            if position is not None and duration:
+                return min(position, duration)
+            return position
+
+        def known_buffered_ms() -> int | None:
+            duration = current_duration_ms()
+            if 0 <= current_song_index < len(songs) and songs[current_song_index].local_path and duration:
+                return duration
+            buffered = player.buffered_ms()
+            if buffered is None:
+                return None
+            if duration:
+                return max(0, min(buffered, duration))
+            return buffered
+
+        def current_buffered_ms() -> int | None:
+            buffered = known_buffered_ms()
+            return buffered if buffered is not None else current_position_ms()
+
+        def selected_song() -> Song | None:
+            if 0 <= current_song_index < len(songs):
+                return songs[current_song_index]
+            return songs[0] if songs else None
+
+        def selected_playlist() -> Playlist | None:
+            return current_playlist
+
+        def save_quality() -> None:
+            settings["quality"] = quality_dropdown.value
+            save_settings(settings)
+            set_status("默认音质已保存")
+
+        def save_play_mode() -> None:
+            settings["play_mode"] = play_mode_dropdown.value
+            save_settings(settings)
+            set_status("播放模式已保存")
+
+        def supports_playlist_write() -> bool:
+            return current_platform in {"qqmusic", "netease"}
+
+        def playlist_can_write(playlist: Playlist | None) -> bool:
+            if not playlist:
+                return False
+            if current_platform == "netease":
+                return is_netease_editable_playlist(playlist, auth.get("qq_number", ""))
+            return not is_builtin_playlist(playlist)
+
+        def playlist_can_add(playlist: Playlist | None) -> bool:
+            if not playlist:
+                return False
+            if current_platform == "netease":
+                return is_netease_addable_playlist(playlist, auth.get("qq_number", ""))
+            return is_addable_playlist(playlist)
+
+        def playlist_can_remove_song(playlist: Playlist | None) -> bool:
+            if not playlist:
+                return False
+            if current_platform == "netease":
+                return is_netease_song_removable_playlist(playlist, auth.get("qq_number", ""))
+            return playlist_can_write(playlist)
+
+        def refresh_account_label() -> None:
+            qq_number = auth.get("qq_number")
+            if qq_number:
+                display_name = auth.get("nickname") or auth.get("username") or qq_number
+                account_text.value = f"{platform_display_name(current_platform)}已登录: {display_name}"
+            else:
+                account_text.value = f"{platform_display_name(current_platform)}未登录"
+            writable = bool(qq_number) and supports_playlist_write()
+            for control in (new_playlist_button, rename_playlist_button, delete_playlist_button, add_song_button):
+                control.disabled = not writable
+            remove_song_button.disabled = False
+            download_song_button.disabled = False
+            safe_update()
+
+        def refresh_playlist_list() -> None:
+            nonlocal selected_playlist_tile_index
+            playlists.clear()
+            playlists.extend(remote_playlists)
+            if has_downloaded_songs(str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"]))):
+                playlists.append(Playlist(id="__downloads__", name="已下载的歌曲", dirid="__downloads__"))
+            playlist_list.controls.clear()
+            for index, playlist in enumerate(playlists):
+                active = current_playlist and playlist.id == current_playlist.id
+                cover_key = f"playlist:{current_platform}:{playlist.id}"
+                cover_url = playlist_cover_url(playlist)
+                playlist_list.controls.append(
+                    ft.Container(
+                        content=ft.Row(
+                            [
+                                mini_cover(playlist.name, cover_key, cover_url),
+                                ft.Column(
+                                    [
+                                        ft.Text(playlist.name, color=text, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                        ft.Text(f"{playlist.song_count or 0} 首" if playlist.song_count is not None else "歌单", color=muted, size=12),
+                                    ],
+                                    spacing=3,
+                                    expand=True,
+                                ),
+                            ],
+                            spacing=10,
+                        ),
+                        padding=9,
+                        border_radius=8,
+                        border=border_all(accent_2 if active else "#00000000"),
+                        bgcolor="#1e293b" if active else "#0f172a",
+                        on_click=lambda _event, selected=index: load_playlist_at(selected),
+                    )
+                )
+                if not cover_url:
+                    schedule_playlist_fallback_cover(playlist, cover_key)
+            selected_playlist_tile_index = next((index for index, playlist in enumerate(playlists) if current_playlist and playlist.id == current_playlist.id), -1)
+            safe_update()
+            schedule_cover_sync()
+
+        def apply_playlist_tile_style(index: int, active: bool) -> None:
+            if not (0 <= index < len(playlist_list.controls)):
+                return
+            tile = playlist_list.controls[index]
+            if not hasattr(tile, "border") or not hasattr(tile, "bgcolor"):
+                return
+            tile.border = border_all(accent_2 if active else "#00000000")
+            tile.bgcolor = "#1e293b" if active else "#0f172a"
+
+        def update_playlist_selection(previous: int, current: int) -> None:
+            nonlocal selected_playlist_tile_index
+            if previous != current:
+                apply_playlist_tile_style(previous, False)
+            apply_playlist_tile_style(current, True)
+            selected_playlist_tile_index = current
+            safe_update()
+
+        def song_queue_display(song: Song) -> tuple[str, str]:
+            meta_parts = []
+            if settings.get("queue_show_singers", True) and song.singers:
+                meta_parts.append(song.singers)
+            if settings.get("queue_show_album", True) and song.album:
+                meta_parts.append(song.album)
+            if settings.get("queue_show_duration", True) and song.duration:
+                meta_parts.append(format_seconds(song.duration))
+            if settings.get("queue_show_mid", False) and song.mid:
+                meta_parts.append(f"MID: {song.mid}")
+            return song.title, " · ".join(meta_parts)
+
+        def apply_song_tile_style(index: int, active: bool) -> None:
+            if not (0 <= index < len(song_list.controls)):
+                return
+            tile = song_list.controls[index]
+            if not hasattr(tile, "border") or not hasattr(tile, "bgcolor"):
+                return
+            tile.border = border_all(accent_2 if active else "#00000000")
+            tile.bgcolor = "#1e293b" if active else "#0f172a"
+
+        def update_song_selection(previous: int, current: int) -> None:
+            nonlocal selected_song_tile_index
+            if previous != current:
+                apply_song_tile_style(previous, False)
+            apply_song_tile_style(current, True)
+            selected_song_tile_index = current
+            queue_text.value = f"{current + 1 if current >= 0 else 0} / {len(songs)}"
+            safe_update()
+
+        def build_song_tile(index: int, song: Song) -> Any:
+            title, meta = song_queue_display(song)
+            active = index == current_song_index
+            cover_key = f"song:{current_platform}:{song_identity(song)}"
+            return ft.Container(
+                content=ft.Row(
+                    [
+                        mini_cover(song.title, cover_key, song_cover_url(song)),
+                        ft.Column(
+                            [
+                                ft.Text(title, color=text, weight=ft.FontWeight.BOLD, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                                ft.Text(meta or "未知歌手", color=muted, size=12, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                            ],
+                            spacing=3,
+                            expand=True,
+                        ),
+                        ft.Text(f"{index + 1:02d}", color=muted, size=12, width=36, text_align=ft.TextAlign.RIGHT),
+                    ],
+                    spacing=10,
+                ),
+                padding=10,
+                border_radius=8,
+                border=border_all(accent_2 if active else "#00000000"),
+                bgcolor="#1e293b" if active else "#0f172a",
+                on_click=lambda _event, selected=index: click_song(selected),
+                on_long_press=lambda _event, selected=index: play_song_at(selected),
+            )
+
+        def refresh_song_list() -> None:
+            nonlocal selected_song_tile_index
+            song_list.controls.clear()
+            for index, song in enumerate(songs):
+                song_list.controls.append(build_song_tile(index, song))
+            selected_song_tile_index = current_song_index
+            queue_text.value = f"{current_song_index + 1 if current_song_index >= 0 else 0} / {len(songs)}"
+            safe_update()
+            schedule_cover_sync()
+
+        def append_song_items(results: list[Song]) -> None:
+            start = len(songs)
+            songs.extend(results)
+            for offset, song in enumerate(results):
+                song_list.controls.append(build_song_tile(start + offset, song))
+            queue_text.value = f"{current_song_index + 1 if current_song_index >= 0 else 0} / {len(songs)}"
+            safe_update()
+            schedule_cover_sync()
+
+        def song_identity(song: Song) -> str:
+            return song.mid or song.song_id or song.local_path or song.title
+
+        def clear_lyric_preview() -> None:
+            nonlocal displayed_lyric_key, current_lyric_entries, current_lyric_index
+            displayed_lyric_key = ""
+            current_lyric_entries = []
+            current_lyric_index = -1
+            lyric_preview_text.value = ""
+
+        def lyric_index_for_position(position_ms: int | None) -> int:
+            if position_ms is None or not current_lyric_entries:
+                return -1
+            active = -1
+            for index, (line_time_ms, _line) in enumerate(current_lyric_entries):
+                if line_time_ms > position_ms + 350:
+                    break
+                active = index
+            return active
+
+        def update_lyric_preview(position_ms: int | None, force: bool = False) -> None:
+            nonlocal current_lyric_index
+            index = lyric_index_for_position(position_ms)
+            if not force and index == current_lyric_index:
+                return
+            current_lyric_index = index
+            lyric_preview_text.value = current_lyric_entries[index][1] if index >= 0 else ""
+
+        def render_lyrics(raw_text: str, song_key: str = "") -> None:
+            nonlocal displayed_lyric_key, current_lyric_entries, current_lyric_index
+            lyric_list.controls.clear()
+            parsed = parse_lrc_lines(raw_text)
+            current_lyric_entries = parsed
+            current_lyric_index = -1
+            lines = [line for _time_ms, line in parsed] if parsed else (strip_lrc_timestamps(raw_text) or "没有返回歌词").splitlines()
+            for line in lines:
+                lyric_list.controls.append(ft.Text(line, color="#bfdbfe", size=14, selectable=True))
+            if song_key:
+                displayed_lyric_key = song_key
+            update_lyric_preview(current_position_ms(), force=True)
+            safe_update()
+
+        def show_song(song: Song, load_lyrics: bool = True) -> None:
+            song_key = song_identity(song)
+            parts = [
+                f"歌曲: {song.title}",
+                f"歌手: {song.singers}" if song.singers else "",
+                f"专辑: {song.album}" if song.album else "",
+                f"时长: {format_seconds(song.duration)}" if song.duration else "",
+                f"MID: {song.mid}",
+            ]
+            song_info.value = "\n".join(part for part in parts if part)
+            if not load_lyrics:
+                if displayed_lyric_key != song_key:
+                    lyric_list.controls[:] = [ft.Text("播放时加载歌词", color=muted)]
+                safe_update()
+                return
+            if displayed_lyric_key == song_key:
+                safe_update()
+                return
+            lyric_list.controls[:] = [ft.Text("正在加载歌词...", color=muted)]
+            safe_update()
+
+            def worker() -> None:
+                try:
+                    text_value = api.lyric(song.mid, auth.get("cookie", "")) or "没有返回歌词"
+                    render_lyrics(text_value, song_key)
+                except Exception as exc:
+                    clear_lyric_preview()
+                    lyric_list.controls[:] = [ft.Text(str(exc), color=danger, selectable=True)]
+                    safe_update()
+
+            run_worker(worker)
+
+        def select_song(index: int) -> None:
+            nonlocal current_song_index
+            if not (0 <= index < len(songs)):
+                return
+            previous = current_song_index
+            current_song_index = index
+            update_song_selection(previous, index)
+            show_song(songs[index], load_lyrics=False)
+
+        def click_song(index: int) -> None:
+            nonlocal last_song_click_index, last_song_click_at
+            now = time.monotonic()
+            if last_song_click_index == index and now - last_song_click_at <= 0.45:
+                last_song_click_index = -1
+                last_song_click_at = 0.0
+                play_song_at(index)
+                return
+            last_song_click_index = index
+            last_song_click_at = now
+            select_song(index)
+
+        def replace_songs(results: list[Song], message: str) -> None:
+            nonlocal current_song_index, playback_token, user_stopped
+            playback_token += 1
+            user_stopped = True
+            clear_lyric_preview()
+            current_song_index = 0 if results else -1
+            songs.clear()
+            songs.extend(results)
+            if results:
+                show_song(results[0], load_lyrics=False)
+            else:
+                song_info.value = "没有歌曲"
+                lyric_list.controls.clear()
+            refresh_song_list()
+            set_status(message)
+
+        def append_songs(results: list[Song], message: str) -> None:
+            if not results:
+                set_status(message)
+                return
+            append_song_items(results)
+            set_status(message)
+
+        def update_playlist_cover_from_songs(playlist: Playlist, results: list[Song]) -> None:
+            if playlist.id == "__downloads__" or playlist_cover_url(playlist):
+                return
+            for song in results:
+                cover_url = song_cover_url(song)
+                if cover_url:
+                    playlist.cover = cover_url
+                    cover_key = f"playlist:{current_platform}:{playlist.id}"
+                    set_cover_for_key(cover_key, cover_url)
+                    safe_update()
+                    return
+
+        def clear_song_queue(message: str) -> None:
+            nonlocal current_song_index, playback_token, user_stopped
+            playback_token += 1
+            user_stopped = True
+            current_song_index = -1
+            songs.clear()
+            clear_lyric_preview()
+            song_info.value = message
+            lyric_list.controls.clear()
+            song_list.controls[:] = [
+                ft.Container(
+                    content=ft.Text(message, color=muted),
+                    padding=12,
+                    border_radius=8,
+                    bgcolor="#0f172a",
+                )
+            ]
+            queue_text.value = "0 / 0"
+            set_status(message)
+
+        def search() -> None:
+            nonlocal current_playlist, playlist_load_token
+            keyword = keyword_field.value.strip()
+            if not keyword:
+                show_message("提示", "先输入歌曲名或歌手")
+                return
+            playlist_load_token += 1
+            current_playlist = None
+            search_platform = current_platform
+            search_api = build_music_api(search_platform, api_base, timeout)
+            search_cookie = auth.get("cookie", "")
+            songs.clear()
+            refresh_song_list()
+
+            def worker() -> None:
+                try:
+                    results = search_api.search(keyword, cookie=search_cookie)
+                except Exception as exc:
+                    show_message("搜索失败", str(exc))
+                    set_status("搜索失败")
+                    return
+                if search_platform != current_platform:
+                    set_status(f"已切换到 {platform_display_name(current_platform)}，忽略旧搜索结果")
+                    return
+                replace_songs(results, f"{platform_display_name(search_platform)}找到 {len(results)} 首")
+
+            run_worker(worker, f"正在搜索 {platform_display_name(search_platform)}...")
+
+        def switch_platform(new_platform: str) -> None:
+            nonlocal api, auth, current_platform, current_playlist, playback_token, playlist_load_token, playlist_fallback_cover_generation, user_stopped, current_song_index, displayed_lyric_key
+            new_platform = normalize_platform(new_platform)
+            if new_platform == current_platform:
+                return
+            player.stop()
+            playback_token += 1
+            playlist_load_token += 1
+            playlist_fallback_cover_generation += 1
+            user_stopped = True
+            current_platform = new_platform
+            settings["platform"] = new_platform
+            save_settings(settings)
+            api = build_music_api(new_platform, api_base, timeout)
+            auth = load_auth(new_platform)
+            current_playlist = None
+            current_song_index = -1
+            displayed_lyric_key = ""
+            remote_playlists.clear()
+            songs.clear()
+            player_title.value = "未播放"
+            player_meta.value = "选择歌曲后点击播放"
+            reset_hero_cover()
+            song_info.value = "搜索歌曲后选择一项"
+            lyric_list.controls.clear()
+            refresh_song_list()
+            refresh_playlist_list()
+            refresh_account_label()
+            page.title = f"{platform_display_name(new_platform)} music_for_all_system(developed_by_Linux_Mint)"
+            set_status(f"已切换到 {platform_display_name(new_platform)}")
+            if auth.get("qq_number") and settings.get("auto_sync_playlists", True):
+                sync_playlists()
+
+        def start_login_action() -> None:
+            if auth.get("qq_number"):
+                logout()
+            elif current_platform == "netease":
+                show_netease_login_dialog()
+            else:
+                show_qq_login_dialog()
+
+        def show_qq_login_dialog() -> None:
+            def start_provider(provider: str) -> None:
+                page.pop_dialog()
+                safe_update()
+                login(provider)
+
+            page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("选择登录方式"),
+                    content=ft.Row(
+                        [
+                            ft.Button("QQ 登录", on_click=lambda _event: start_provider("qq")),
+                            ft.Button("微信登录", on_click=lambda _event: start_provider("wechat")),
+                        ],
+                        spacing=10,
+                    ),
+                    actions=[ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update()))],
+                )
+            )
+            safe_update()
+
+        def login(provider: str = "qq") -> None:
+            provider_name = "微信" if provider == "wechat" else "QQ"
+
+            def worker() -> None:
+                try:
+                    session = api.start_wx_qr_login() if provider == "wechat" else api.start_qr_login()
+                except Exception as exc:
+                    show_message("登录失败", str(exc))
+                    set_status("获取二维码失败")
+                    return
+                status = ft.Text(f"等待{provider_name}扫码...", color=muted)
+                dialog = ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text(f"使用{provider_name}扫码登录"),
+                    content=ft.Column(
+                        [
+                            ft.Image(src=session.image, width=220, height=220),
+                            status,
+                        ],
+                        tight=True,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    actions=[ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update()))],
+                )
+                page.show_dialog(dialog)
+                safe_update()
+                deadline = time.time() + 180
+                while time.time() < deadline:
+                    try:
+                        state, result = api.poll_wx_qr_login(session) if provider == "wechat" else api.poll_qr_login(session)
+                    except Exception as exc:
+                        show_message("登录失败", str(exc))
+                        set_status("登录失败")
+                        return
+                    if state == "done" and result:
+                        save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
+                        auth.clear()
+                        auth.update(load_auth(current_platform))
+                        page.pop_dialog()
+                        refresh_account_label()
+                        set_status(f"已登录: {result.nickname or result.qq_number}")
+                        sync_playlists()
+                        return
+                    if state == "confirming":
+                        status.value = "已扫码，等待手机确认..."
+                    elif state == "expired":
+                        page.pop_dialog()
+                        show_message("登录", "二维码已过期，请重新点击登录")
+                        set_status("二维码已过期")
+                        return
+                    safe_update()
+                    time.sleep(2)
+                page.pop_dialog()
+                show_message("登录", "登录超时，请重新点击登录")
+                set_status("登录超时")
+
+            run_worker(worker, f"正在获取{provider_name}登录二维码...")
+
+        def show_netease_login_dialog() -> None:
+            phone = ft.TextField(label="手机号", width=260)
+            country = ft.TextField(label="区号", value="86", width=90)
+            captcha = ft.TextField(label="短信验证码", width=180)
+            status = ft.Text("", color=muted)
+            captcha_sent = {"value": False}
+
+            def send(_event: object | None = None) -> None:
+                phone_value = phone.value.strip()
+                country_value = country.value.strip() or "86"
+                if not phone_value:
+                    status.value = "请输入手机号"
+                    safe_update()
+                    return
+
+                def worker() -> None:
+                    try:
+                        api.send_phone_captcha(phone_value, country_value)
+                    except Exception as exc:
+                        status.value = str(exc)
+                        safe_update()
+                        return
+                    captcha_sent["value"] = True
+                    status.value = "验证码已发送，请输入短信里的完整数字验证码"
+                    safe_update()
+
+                run_worker(worker, "正在发送验证码...")
+
+            def submit(_event: object | None = None) -> None:
+                if not captcha_sent["value"]:
+                    status.value = "请先发送验证码"
+                    safe_update()
+                    return
+
+                def worker() -> None:
+                    try:
+                        result = api.login_with_phone_captcha(phone.value.strip(), captcha.value.strip(), country.value.strip() or "86")
+                        save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
+                    except Exception as exc:
+                        status.value = str(exc)
+                        safe_update()
+                        return
+                    auth.clear()
+                    auth.update(load_auth(current_platform))
+                    page.pop_dialog()
+                    refresh_account_label()
+                    set_status(f"已登录: {result.nickname or result.qq_number}")
+                    sync_playlists()
+
+                run_worker(worker, "正在登录...")
+
+            def import_cookie(_event: object | None = None) -> None:
+                page.pop_dialog()
+                safe_update()
+                ask_text("导入网易云 Cookie", "粘贴官方网页版 Cookie，至少包含 MUSIC_U", multiline=True, on_submit=submit_cookie_login)
+
+            page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("网易云音乐登录"),
+                    content=ft.Column([ft.Row([country, phone]), captcha, status], tight=True),
+                    actions=[
+                        ft.TextButton("发送验证码", on_click=send),
+                        ft.TextButton("导入Cookie", on_click=import_cookie),
+                        ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update())),
+                        ft.TextButton("登录", on_click=submit),
+                    ],
+                )
+            )
+            safe_update()
+
+        def submit_cookie_login(cookie: str) -> None:
+            if not cookie:
+                show_message("提示", "请先粘贴 Cookie")
+                return
+
+            def worker() -> None:
+                try:
+                    result = api.login_with_cookie(cookie)
+                    save_auth(result.qq_number, result.cookie, current_platform, result.nickname)
+                except Exception as exc:
+                    show_message("导入失败", str(exc))
+                    return
+                auth.clear()
+                auth.update(load_auth(current_platform))
+                refresh_account_label()
+                set_status(f"已登录: {result.nickname or result.qq_number}")
+                sync_playlists()
+
+            run_worker(worker, "正在导入 Cookie...")
+
+        def logout() -> None:
+            nonlocal displayed_lyric_key, playlist_load_token, playlist_fallback_cover_generation
+            player.stop()
+            playlist_load_token += 1
+            playlist_fallback_cover_generation += 1
+            clear_auth(current_platform)
+            auth.clear()
+            displayed_lyric_key = ""
+            remote_playlists.clear()
+            songs.clear()
+            refresh_song_list()
+            refresh_playlist_list()
+            refresh_account_label()
+            set_status("已退出登录")
+
+        def sync_playlists() -> None:
+            nonlocal playlist_fallback_cover_generation
+            qq_number = auth.get("qq_number", "")
+            if not qq_number:
+                show_message("提示", f"先登录 {platform_display_name(current_platform)}")
+                return
+            playlist_fallback_cover_generation += 1
+            playlist_fallback_cover_pending.clear()
+            playlist_fallback_cover_done.clear()
+
+            def worker() -> None:
+                try:
+                    results = api.user_playlists(qq_number, auth.get("cookie", ""))
+                except Exception as exc:
+                    show_message("同步失败", str(exc))
+                    set_status("同步失败")
+                    return
+                remote_playlists.clear()
+                remote_playlists.extend(results)
+                refresh_playlist_list()
+                set_status(f"已同步 {len(remote_playlists)} 个歌单")
+
+            run_worker(worker, "正在同步歌单...")
+
+        def load_playlist_at(index: int) -> None:
+            nonlocal current_playlist
+            if not (0 <= index < len(playlists)):
+                return
+            previous = selected_playlist_tile_index
+            current_playlist = playlists[index]
+            update_playlist_selection(previous, index)
+            load_playlist()
+
+        def load_playlist() -> None:
+            nonlocal playlist_load_token
+            playlist = selected_playlist()
+            if not playlist:
+                return
+            playlist_load_token += 1
+            load_token = playlist_load_token
+            if playlist.id == "__downloads__":
+                replace_songs(downloaded_songs(str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"]))), "已下载的歌曲")
+                return
+            clear_song_queue(f"正在加载歌单: {playlist.name}")
+
+            def worker() -> None:
+                try:
+                    playlist_name, results, total = api.playlist_songs_page(playlist.id, auth.get("cookie", ""), 0, PLAYLIST_INITIAL_PAGE_SIZE)
+                except Exception as exc:
+                    if load_token != playlist_load_token:
+                        return
+                    show_message("歌单加载失败", str(exc))
+                    set_status("歌单加载失败")
+                    return
+                if load_token != playlist_load_token:
+                    return
+                loaded = len(results)
+                update_playlist_cover_from_songs(playlist, results)
+                replace_songs(results, f"{playlist_name}: 已加载 {loaded} / {total} 首")
+
+                while load_token == playlist_load_token:
+                    try:
+                        page_name, page_results, page_total = api.playlist_songs_page(
+                            playlist.id,
+                            auth.get("cookie", ""),
+                            loaded,
+                            PLAYLIST_BACKGROUND_PAGE_SIZE,
+                        )
+                    except Exception as exc:
+                        if load_token == playlist_load_token:
+                            set_status(f"已加载 {loaded} / {total} 首，后续加载失败: {exc}")
+                        return
+                    if load_token != playlist_load_token:
+                        return
+                    if page_name:
+                        playlist_name = page_name
+                    total = max(total, page_total)
+                    if not page_results:
+                        break
+                    update_playlist_cover_from_songs(playlist, page_results)
+
+                    chunk_start = 0
+                    while chunk_start < len(page_results) and load_token == playlist_load_token:
+                        chunk = page_results[chunk_start : chunk_start + 100]
+                        loaded += len(chunk)
+                        append_songs(chunk, f"{playlist_name}: 已加载 {min(loaded, total)} / {total} 首")
+                        chunk_start += len(chunk)
+                        time.sleep(0.01)
+                    if len(page_results) < PLAYLIST_BACKGROUND_PAGE_SIZE:
+                        break
+                    if loaded >= total:
+                        total = loaded + PLAYLIST_BACKGROUND_PAGE_SIZE
+
+                if load_token == playlist_load_token:
+                    set_status(f"{playlist_name}: {len(songs)} 首")
+
+            run_worker(worker, f"正在加载歌单: {playlist.name}")
+
+        def require_login_cookie() -> str | None:
+            cookie = auth.get("cookie", "")
+            if not cookie:
+                show_message("提示", "请先登录")
+                return None
+            return cookie
+
+        def create_playlist_action() -> None:
+            cookie = require_login_cookie()
+            if not cookie:
+                return
+
+            def submit(name: str) -> None:
+                if not name:
+                    return
+
+                def worker() -> None:
+                    try:
+                        api.create_playlist(name, cookie)
+                    except Exception as exc:
+                        show_message("创建失败", str(exc))
+                        return
+                    set_status("歌单已创建")
+                    sync_playlists()
+
+                run_worker(worker, "正在创建歌单...")
+
+            ask_text("新建歌单", "歌单名称", on_submit=submit)
+
+        def rename_playlist_action() -> None:
+            cookie = require_login_cookie()
+            playlist = selected_playlist()
+            if not cookie or not playlist:
+                show_message("提示", "先选择一个歌单")
+                return
+            if not playlist_can_write(playlist):
+                show_message("提示", f"“{playlist.name}”不是可重命名的自建歌单")
+                return
+
+            def submit(name: str) -> None:
+                if not name or name == playlist.name:
+                    return
+
+                def worker() -> None:
+                    try:
+                        api.rename_playlist(playlist.dirid or playlist.id, name, cookie)
+                    except Exception as exc:
+                        show_message("重命名失败", str(exc))
+                        return
+                    set_status("歌单已重命名")
+                    sync_playlists()
+
+                run_worker(worker, "正在重命名歌单...")
+
+            ask_text("重命名歌单", "新名称", playlist.name, on_submit=submit)
+
+        def delete_playlist_action() -> None:
+            cookie = require_login_cookie()
+            playlist = selected_playlist()
+            if not cookie or not playlist:
+                show_message("提示", "先选择一个歌单")
+                return
+            if not playlist_can_write(playlist):
+                show_message("提示", f"“{playlist.name}”不是可删除的自建歌单")
+                return
+
+            def delete_it() -> None:
+                def worker() -> None:
+                    try:
+                        api.delete_playlist(playlist.dirid or playlist.id, cookie)
+                    except Exception as exc:
+                        show_message("删除失败", str(exc))
+                        return
+                    set_status("歌单已删除")
+                    sync_playlists()
+
+                run_worker(worker, "正在删除歌单...")
+
+            confirm("删除歌单", f"确定删除“{playlist.name}”吗？", delete_it)
+
+        def add_song_to_playlist_action() -> None:
+            song = selected_song()
+            cookie = require_login_cookie()
+            if not song or not cookie:
+                show_message("提示", "先选择一首歌")
+                return
+            candidates = [playlist for playlist in remote_playlists if playlist_can_add(playlist)]
+            if not candidates:
+                show_message("提示", f"还没有可加入的{platform_display_name(current_platform)}自建歌单")
+                return
+            if len(candidates) == 1:
+                add_song_to_playlist_target(song, candidates[0], cookie)
+                return
+            choices = ft.ListView(width=420, height=360, spacing=8)
+
+            def choose(target: Playlist) -> None:
+                page.pop_dialog()
+                safe_update()
+                add_song_to_playlist_target(song, target, cookie)
+
+            for playlist in candidates:
+                choices.controls.append(ft.ListTile(title=playlist.name, subtitle=playlist.display, on_click=lambda _event, target=playlist: choose(target)))
+            page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text(f"选择要加入的歌单：{song.title}"),
+                    content=choices,
+                    actions=[ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update()))],
+                )
+            )
+            safe_update()
+
+        def add_song_to_playlist_target(song: Song, playlist: Playlist, cookie: str) -> None:
+            def worker() -> None:
+                try:
+                    api.add_song_to_playlist(song.song_id, song.song_type, playlist.dirid or playlist.id, cookie, song.mid, playlist.id)
+                except Exception as exc:
+                    show_message("添加失败", str(exc))
+                    set_status("添加失败")
+                    return
+                set_status(f"已加入: {playlist.name}")
+                sync_playlists()
+
+            run_worker(worker, f"正在加入歌单: {playlist.name}")
+
+        def remove_song_from_playlist_action() -> None:
+            song = selected_song()
+            playlist = selected_playlist()
+            cookie = require_login_cookie()
+            if not song or not playlist or not cookie:
+                show_message("提示", "先打开歌单并选择要移除的歌曲")
+                return
+            if not playlist_can_remove_song(playlist):
+                show_message("提示", f"“{playlist.name}”不支持移除歌曲")
+                return
+
+            def remove_it() -> None:
+                def worker() -> None:
+                    try:
+                        api.remove_song_from_playlist(song.song_id, song.song_type, playlist.dirid or playlist.id, cookie)
+                    except Exception as exc:
+                        show_message("移除失败", str(exc))
+                        return
+                    set_status("歌曲已移除")
+                    load_playlist()
+
+                run_worker(worker, "正在移除歌曲...")
+
+            confirm("移除歌曲", f"从“{playlist.name}”移除“{song.title}”？", remove_it)
+
+        def download_song_action() -> None:
+            song = selected_song()
+            if not song:
+                show_message("提示", "先选择一首歌")
+                return
+            if song.local_path:
+                show_message("提示", "这首歌已经是本地文件")
+                return
+
+            def worker() -> None:
+                try:
+                    url = api.song_url(song.mid, str(quality_dropdown.value), auth.get("cookie", ""), song.media_mid)
+                    target_dir = Path(str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"]))).expanduser()
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    extension = guess_audio_extension(url, str(quality_dropdown.value))
+                    base_name = safe_filename(f"{song.title} - {song.singers}" if song.singers else song.title)
+                    target = target_dir / f"{base_name}{extension}"
+                    counter = 2
+                    while target.exists():
+                        target = target_dir / f"{base_name} ({counter}){extension}"
+                        counter += 1
+                    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 music-linux-client/1.0"})
+                    with urllib.request.urlopen(request, timeout=timeout) as response, target.open("wb") as file:
+                        shutil.copyfileobj(response, file)
+                except Exception as exc:
+                    show_message("下载失败", str(exc))
+                    set_status("下载失败")
+                    return
+                set_status(f"已下载: {song.title}")
+                refresh_playlist_list()
+
+            run_worker(worker, f"正在下载: {song.title}")
+
+        def next_index_for_mode(auto: bool = False, reverse: bool = False) -> int:
+            if not songs:
+                return -1
+            mode = str(play_mode_dropdown.value)
+            index = current_song_index if current_song_index >= 0 else 0
+            if mode == "单曲循环":
+                return index
+            if mode == "随机播放":
+                if len(songs) == 1:
+                    return index
+                choices = [candidate for candidate in range(len(songs)) if candidate != index]
+                return random.choice(choices)
+            if reverse:
+                return index - 1 if index > 0 else len(songs) - 1
+            next_index = index + 1
+            if next_index < len(songs):
+                return next_index
+            return -1 if auto else 0
+
+        def monitor_playback(token: int) -> None:
+            time.sleep(4)
+            while token == playback_token and not user_stopped:
+                if player.has_ended():
+                    auto_advance(token)
+                    return
+                time.sleep(1)
+
+        def auto_advance(token: int) -> None:
+            if token != playback_token or user_stopped:
+                return
+            next_index = next_index_for_mode(auto=True)
+            if next_index < 0:
+                player_meta.value = "播放完成"
+                progress_slider.value = 100
+                progress_slider.secondary_track_value = 100
+                play_button.content.value = "播放"
+                reset_hero_cover()
+                set_status("播放完成")
+                return
+            play_song_at(next_index)
+
+        def set_progress_values(position: int | None, duration: int | None) -> None:
+            if duration and position is not None:
+                progress_slider.value = max(0, min(100, position * 100 / duration))
+                buffered = current_buffered_ms()
+                if buffered is not None:
+                    progress_slider.secondary_track_value = max(progress_slider.value or 0, min(100, buffered * 100 / duration))
+                else:
+                    progress_slider.secondary_track_value = progress_slider.value
+            elif user_stopped:
+                progress_slider.value = 0
+                progress_slider.secondary_track_value = 0
+
+        def refresh_playback_progress() -> None:
+            if progress_dragging:
+                return
+            duration = current_duration_ms()
+            position = current_position_ms()
+            duration_text.value = format_milliseconds(duration)
+            elapsed_text.value = format_milliseconds(position)
+            set_progress_values(position, duration)
+            update_lyric_preview(position)
+            safe_update()
+
+        def drive_playback_progress(token: int) -> None:
+            while token == playback_token and not user_stopped:
+                refresh_playback_progress()
+                time.sleep(0.25)
+            refresh_playback_progress()
+
+        def play_song_at(index: int, start_position_ms: int = 0) -> None:
+            nonlocal current_song_index, playback_token, user_stopped, playback_started_at, paused_position_ms, pending_buffer_resume_ms
+            if not (0 <= index < len(songs)):
+                show_message("提示", "先选择一首歌")
+                return
+            song = songs[index]
+            previous_index = current_song_index
+            playback_token += 1
+            token = playback_token
+            current_song_index = index
+            user_stopped = False
+            pending_buffer_resume_ms = None
+            paused_position_ms = max(0, int(start_position_ms))
+            play_button.content.value = "暂停"
+            player_title.value = song.title
+            player_meta.value = song.singers or song.album or "正在获取播放链接"
+            set_hero_cover(song_cover_url(song))
+            duration = song.duration * 1000 if song.duration else None
+            set_progress_values(paused_position_ms, duration)
+            elapsed_text.value = format_milliseconds(paused_position_ms)
+            duration_text.value = format_milliseconds(duration)
+            update_lyric_preview(paused_position_ms, force=True)
+            show_song(song, load_lyrics=False)
+            update_song_selection(previous_index, index)
+
+            def worker() -> None:
+                nonlocal playback_started_at
+                try:
+                    url = song.local_path or api.song_url(song.mid, str(quality_dropdown.value), auth.get("cookie", ""), song.media_mid)
+                    player.play(url, paused_position_ms)
+                    if paused_position_ms:
+                        player.seek_ms(paused_position_ms)
+                except Exception as exc:
+                    play_button.content.value = "播放"
+                    show_message("播放失败", str(exc))
+                    set_status("播放失败")
+                    return
+                playback_started_at = time.monotonic() - (paused_position_ms / 1000)
+                player_meta.value = song.singers or song.album or "正在播放"
+                set_status("正在播放")
+                page.run_thread(lambda: drive_playback_progress(token))
+                page.run_thread(lambda: monitor_playback(token))
+                if displayed_lyric_key != song_identity(song):
+                    show_song(song, load_lyrics=True)
+
+            run_worker(worker, "正在获取播放链接...")
+
+        def play_selected() -> None:
+            index = current_song_index if current_song_index >= 0 else (0 if songs else -1)
+            if user_stopped and index == current_song_index and paused_position_ms:
+                resume_paused_song()
+                return
+            play_song_at(index)
+
+        def resume_paused_song() -> None:
+            nonlocal playback_token, user_stopped, playback_started_at, pending_buffer_resume_ms
+            if not (user_stopped and paused_position_ms and 0 <= current_song_index < len(songs)):
+                play_selected()
+                return
+            if not player.resume():
+                play_song_at(current_song_index, paused_position_ms)
+                return
+            playback_token += 1
+            token = playback_token
+            user_stopped = False
+            pending_buffer_resume_ms = None
+            playback_started_at = time.monotonic() - (paused_position_ms / 1000)
+            play_button.content.value = "暂停"
+            player_meta.value = "继续"
+            set_status("继续")
+            page.run_thread(lambda: drive_playback_progress(token))
+            page.run_thread(lambda: monitor_playback(token))
+
+        def play_previous() -> None:
+            if not songs:
+                show_message("提示", "当前没有歌曲队列")
+                return
+            play_song_at(next_index_for_mode(reverse=True))
+
+        def play_next() -> None:
+            if not songs:
+                show_message("提示", "当前没有歌曲队列")
+                return
+            next_index = next_index_for_mode()
+            if next_index >= 0:
+                play_song_at(next_index)
+
+        def stop() -> None:
+            nonlocal playback_token, user_stopped, playback_started_at, paused_position_ms, pending_buffer_resume_ms
+            playback_token += 1
+            position = current_position_ms()
+            if position is not None:
+                paused_position_ms = position
+            user_stopped = True
+            pending_buffer_resume_ms = None
+            playback_started_at = 0.0
+            player.pause()
+            player_meta.value = "已暂停"
+            play_button.content.value = "播放"
+            elapsed_text.value = format_milliseconds(paused_position_ms)
+            duration = current_duration_ms()
+            set_progress_values(paused_position_ms, duration)
+            update_lyric_preview(paused_position_ms)
+            set_status("已暂停")
+
+        def toggle_play_pause() -> None:
+            if user_stopped:
+                play_selected()
+            else:
+                stop()
+
+        def cleanup_playback(_event: object | None = None) -> None:
+            nonlocal playback_token, user_stopped, playback_started_at, pending_buffer_resume_ms
+            playback_token += 1
+            user_stopped = True
+            pending_buffer_resume_ms = None
+            playback_started_at = 0.0
+            player.stop()
+
+        page.on_close = cleanup_playback
+        page.on_disconnect = cleanup_playback
+
+        def begin_progress_drag() -> None:
+            nonlocal progress_dragging
+            progress_dragging = True
+
+        def slider_event_value(event: object | None = None) -> float:
+            candidates = [
+                getattr(getattr(event, "control", None), "value", None),
+                getattr(event, "data", None),
+                progress_slider.value,
+            ]
+            for candidate in candidates:
+                try:
+                    return max(0.0, min(100.0, float(candidate)))
+                except (TypeError, ValueError):
+                    continue
+            return 0.0
+
+        def progress_value_to_ms(value: float | None = None) -> int | None:
+            duration = current_duration_ms()
+            if not duration:
+                return None
+            slider_value = slider_event_value() if value is None else max(0.0, min(100.0, float(value)))
+            return int(duration * slider_value / 100)
+
+        def preview_progress_drag(event: object | None = None) -> None:
+            if not progress_dragging:
+                return
+            value = slider_event_value(event)
+            progress_slider.value = value
+            position = progress_value_to_ms(value)
+            elapsed_text.value = format_milliseconds(position)
+            progress_slider.label = format_milliseconds(position)
+            update_lyric_preview(position, force=True)
+            safe_update()
+
+        def wait_for_buffer_then_resume(token: int, target_position_ms: int) -> None:
+            nonlocal playback_started_at, user_stopped, pending_buffer_resume_ms
+            while token == playback_token and pending_buffer_resume_ms == target_position_ms:
+                buffered = current_buffered_ms()
+                if buffered is None or buffered + 500 >= target_position_ms:
+                    if player.seek_ms(target_position_ms):
+                        playback_started_at = time.monotonic() - (target_position_ms / 1000)
+                    player.resume()
+                    user_stopped = False
+                    pending_buffer_resume_ms = None
+                    play_button.content.value = "暂停"
+                    set_status("正在播放")
+                    page.run_thread(lambda: drive_playback_progress(token))
+                    page.run_thread(lambda: monitor_playback(token))
+                    return
+                elapsed_text.value = format_milliseconds(target_position_ms)
+                set_progress_values(target_position_ms, current_duration_ms())
+                safe_update()
+                time.sleep(0.3)
+
+        def finish_progress_drag(event: object | None = None) -> None:
+            nonlocal playback_started_at, paused_position_ms, progress_dragging, user_stopped, playback_token, pending_buffer_resume_ms
+            value = slider_event_value(event)
+            progress_slider.value = value
+            position = progress_value_to_ms(value)
+            progress_dragging = False
+            progress_slider.label = None
+            if position is None:
+                return
+            paused_position_ms = position
+            buffered = known_buffered_ms()
+            duration = current_duration_ms()
+            if buffered is not None and duration and buffered + 500 < position:
+                playback_token += 1
+                token = playback_token
+                pending_buffer_resume_ms = position
+                user_stopped = True
+                player.pause()
+                play_button.content.value = "播放"
+                player_meta.value = "等待缓冲"
+                elapsed_text.value = format_milliseconds(position)
+                set_progress_values(position, duration)
+                update_lyric_preview(position, force=True)
+                set_status("等待缓冲")
+                page.run_thread(lambda: wait_for_buffer_then_resume(token, position))
+            elif player.seek_ms(position):
+                playback_started_at = time.monotonic() - (position / 1000)
+                elapsed_text.value = format_milliseconds(position)
+                set_progress_values(position, duration)
+                update_lyric_preview(position, force=True)
+            else:
+                player_meta.value = "当前播放器不支持拖动进度"
+            safe_update()
+
+        def open_settings() -> None:
+            show_singers = ft.Checkbox(label="显示歌手", value=bool(settings.get("queue_show_singers", True)))
+            show_album = ft.Checkbox(label="显示专辑名", value=bool(settings.get("queue_show_album", True)))
+            show_duration = ft.Checkbox(label="显示歌曲时长", value=bool(settings.get("queue_show_duration", True)))
+            show_mid = ft.Checkbox(label="显示 MID", value=bool(settings.get("queue_show_mid", False)))
+            auto_sync = ft.Checkbox(label="启动时自动同步歌单", value=bool(settings.get("auto_sync_playlists", True)))
+            font_size = ft.Dropdown(
+                value=str(settings.get("queue_font_size", 11)),
+                options=[option(str(size), str(size)) for size in (10, 11, 12, 13, 14)],
+                width=100,
+            )
+            download_dir = ft.TextField(label="下载目录", value=str(settings.get("download_dir", DEFAULT_SETTINGS["download_dir"])), width=420)
+            account_status = ft.Text(account_text.value, color=accent, weight=ft.FontWeight.BOLD)
+
+            def close_then(action: Any) -> None:
+                page.pop_dialog()
+                safe_update()
+                action()
+
+            def apply(_event: object | None = None) -> None:
+                settings.update(
+                    {
+                        "queue_show_singers": show_singers.value,
+                        "queue_show_album": show_album.value,
+                        "queue_show_duration": show_duration.value,
+                        "queue_show_mid": show_mid.value,
+                        "queue_font_size": int(font_size.value),
+                        "auto_sync_playlists": auto_sync.value,
+                        "download_dir": download_dir.value.strip() or str(DEFAULT_SETTINGS["download_dir"]),
+                    }
+                )
+                save_settings(settings)
+                refresh_song_list()
+                page.pop_dialog()
+                set_status("设置已保存")
+
+            page.show_dialog(
+                ft.AlertDialog(
+                    modal=True,
+                    title=ft.Text("设置"),
+                    content=ft.Column(
+                        [
+                            ft.Text("账号", color=text, weight=ft.FontWeight.BOLD),
+                            account_status,
+                            ft.Row(
+                                [
+                                    ft.Button(
+                                        ft.Text("退出登录" if auth.get("qq_number") else "登录", no_wrap=True),
+                                        on_click=lambda _event: close_then(start_login_action),
+                                        bgcolor="#1e293b",
+                                        color=text,
+                                    ),
+                                    ft.Button(
+                                        ft.Text("同步歌单", no_wrap=True),
+                                        on_click=lambda _event: close_then(sync_playlists),
+                                        bgcolor="#1e293b",
+                                        color=text,
+                                        disabled=not bool(auth.get("qq_number")),
+                                    ),
+                                ],
+                                spacing=8,
+                            ),
+                            ft.Divider(color=line),
+                            show_singers,
+                            show_album,
+                            show_duration,
+                            show_mid,
+                            ft.Row([ft.Text("队列字体大小"), font_size]),
+                            auto_sync,
+                            download_dir,
+                        ],
+                        tight=True,
+                    ),
+                    actions=[
+                        ft.TextButton("取消", on_click=lambda _event: (page.pop_dialog(), safe_update())),
+                        ft.TextButton("保存", on_click=apply),
+                    ],
+                )
+            )
+            safe_update()
+
+        sidebar = card(
+            ft.Column(
+                [
+                    ft.Column([ft.Text("Music", color=text, size=20, weight=ft.FontWeight.BOLD), account_text], spacing=4),
+                    ft.Container(height=1, bgcolor=line),
+                    ft.Column(
+                        [
+                            ft.Row([new_playlist_button, rename_playlist_button], spacing=8),
+                            ft.Row([delete_playlist_button], spacing=8),
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Text("我的歌单", color=text, size=13, weight=ft.FontWeight.BOLD),
+                    playlist_list,
+                ],
+                spacing=12,
+                expand=True,
+            ),
+            expand=False,
+            padding=16,
+        )
+        sidebar.width = 310
+
+        hero = ft.Container(
+            content=ft.Row(
+                [
+                    hero_cover,
+                    ft.Column([ft.Text("NOW PLAYING", color=muted, size=12, weight=ft.FontWeight.BOLD), player_title, player_meta], spacing=8, expand=True),
+                    queue_text,
+                ],
+                spacing=18,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=18,
+            border_radius=8,
+            border=border_all(line),
+            bgcolor=panel_soft,
+        )
+
+        main = card(
+            ft.Column(
+                [
+                    ft.Row([keyword_field, platform_dropdown, search_button, settings_button, quality_dropdown], spacing=10),
+                    hero,
+                    ft.Row(
+                        [
+                            ft.Container(
+                                content=ft.Column(
+                                    [
+                                        ft.Row([ft.Text("歌曲队列", color=text, size=16, weight=ft.FontWeight.BOLD), ft.Row([add_song_button, remove_song_button, download_song_button], spacing=8)], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                                        song_list,
+                                    ],
+                                    expand=True,
+                                ),
+                                expand=3,
+                                padding=14,
+                                bgcolor="#020617",
+                                border=border_all(line),
+                                border_radius=8,
+                            ),
+                            ft.Container(
+                                content=ft.Column(
+                                    [
+                                        ft.Text("歌曲信息", color=text, size=16, weight=ft.FontWeight.BOLD),
+                                        song_info,
+                                        ft.Divider(color=line),
+                                        ft.Text("歌词", color=text, size=16, weight=ft.FontWeight.BOLD),
+                                        lyric_list,
+                                    ],
+                                    expand=True,
+                                ),
+                                expand=2,
+                                padding=14,
+                                bgcolor="#020617",
+                                border=border_all(line),
+                                border_radius=8,
+                            ),
+                        ],
+                        spacing=14,
+                        expand=True,
+                    ),
+                ],
+                spacing=14,
+                expand=True,
+            ),
+            expand=True,
+            padding=16,
+        )
+
+        player_bar = ft.Container(
+            content=ft.Row(
+                [
+                    ft.Row([prev_button, play_button, next_button, play_mode_dropdown], spacing=8),
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Row([status_text, lyric_preview_text], spacing=12),
+                                ft.Row([elapsed_text, progress_slider, duration_text], spacing=8),
+                            ],
+                            spacing=4,
+                        ),
+                        expand=True,
+                    ),
+                ],
+                spacing=18,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+            padding=ft.Padding(14, 10, 14, 10),
+            bgcolor="#101827",
+            border=ft.Border(top=ft.BorderSide(1, line)),
+        )
+
+        page.add(
+            ft.Column(
+                [
+                    ft.Row([sidebar, main], spacing=16, expand=True),
+                    player_bar,
+                ],
+                expand=True,
+                spacing=0,
+            )
+        )
+        refresh_account_label()
+        refresh_playlist_list()
+        refresh_playback_progress()
+        resize_progress()
+        page.on_resize = resize_progress
+        if auth.get("qq_number") and settings.get("auto_sync_playlists", True):
+            sync_playlists()
+
+    ft.run(app, view=ft.AppView.FLET_APP)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Music Linux client")
     parser.add_argument("--api-base", default=os.environ.get("QQMUSIC_API_BASE", DEFAULT_API_BASE))
@@ -4197,7 +6075,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command:
             return run_cli(args)
-        return run_gui(args.api_base, args.timeout, args.player)
+        return run_flet_gui(args.api_base, args.timeout, args.player)
     except QQMusicError as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1

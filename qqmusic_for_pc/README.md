@@ -28,12 +28,13 @@
 
 ## 运行前准备
 
-这个项目只有一个 Python 脚本，基础功能主要使用 Python 标准库。图形界面需要 `tkinter`，微信扫码登录需要 `Pillow` 显示二维码，内嵌播放器是可选的。
+这个项目的主入口是 `qqmusic_client.py`，基础功能主要使用 Python 标准库。图形界面现在默认使用 `flet` + `flet-desktop`；旧的 `tkinter` 界面已经拆到 `qqmusic_client_old_ui.py`。微信扫码登录需要 `Pillow` 显示二维码，内嵌播放器是可选的。
 
 最低建议：
 
 - Python 3.10 或更新版本。
-- 图形界面：`tkinter`。Linux Mint/Ubuntu 上通常安装 `python3-tk`。
+- 新图形界面：`flet` + `flet-desktop`。
+- 旧图形界面：`tkinter`，Linux Mint/Ubuntu 上通常安装 `python3-tk`。
 - 微信扫码登录：`Pillow`。
 - 播放器：建议安装 `vlc`、`mpv` 或 `ffmpeg` 里的 `ffplay`。如果都没有，程序会尝试用系统默认方式打开播放链接。
 - 可选内嵌播放：`python-vlc` 加 VLC/libVLC。
@@ -59,6 +60,12 @@ sudo apt install python3-vlc
 python3 qqmusic_client.py
 ```
 
+如果要启动旧的 Tkinter 界面：
+
+```bash
+python3 qqmusic_client_old_ui.py
+```
+
 如果系统仓库里的 `python3-vlc` 不可用，也可以用虚拟环境安装：
 
 ```bash
@@ -73,7 +80,7 @@ python qqmusic_client.py
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install pillow python-vlc
+uv pip install flet flet-desktop pillow python-vlc
 python qqmusic_client.py
 ```
 
@@ -82,7 +89,7 @@ python qqmusic_client.py
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install pillow
+uv pip install flet flet-desktop pillow
 python qqmusic_client.py
 ```
 
