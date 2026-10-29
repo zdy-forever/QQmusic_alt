@@ -1,0 +1,3892 @@
+<title>月下方海</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+  /* Layout: full-bleed WebGL night scene; quiet caption bottom-left, one control bottom-right */
+  :root {
+    --night: #131a2b;   /* horizon haze = fog colour, so sea and sky meet seamlessly */
+    --deep: #03050c;
+    --ink: #d6deee;
+    --dim: #7d8aa6;
+    --line: rgba(214, 222, 238, 0.26);
+    --display: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    --moon-rgb: 214, 226, 248;     /* the scene's light colour, kept in step with the moon by the page */
+    --ui: "Microsoft YaHei", "微软雅黑", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;   /* all buttons */
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    touch-action: none;            /* drags steer the scene, not the browser */
+    user-select: none;
+    -webkit-user-select: none;
+    background: var(--night);
+    color: var(--ink);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  /* Opening: the night fades up from black */
+  #veil { position: fixed; inset: 0; z-index: 30; background: var(--deep); pointer-events: none; transition: opacity 1.8s ease-out; display: grid; place-items: center; }
+  #veil.gone { opacity: 0; }
+  /* After the closing: a faint line in the dark */
+  #veil .veil-hint { margin: 0; font-family: var(--ui); font-size: 13px; letter-spacing: 0.2em; color: var(--dim); opacity: 0; transition: opacity 2s ease; }
+  #veil.ended .veil-hint { opacity: 0.7; }
+  /* The buttons step aside while the closing plays */
+  body.closing .topbar, body.closing .controls, body.closing .player { opacity: 0; pointer-events: none; transition: opacity .6s; }
+
+
+  /* The caption is no longer shown on screen; it stays in the page (visually hidden) so screen readers
+     still hear the title, the locked cube, the song and the sky */
+  .cap {
+    position: fixed;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .cap h1 {
+    margin: 0;
+    font-family: var(--display);
+    font-weight: 300;
+    font-size: clamp(22px, 3vw, 32px);
+    letter-spacing: 0.32em;
+    color: var(--ink);
+    text-wrap: balance;
+  }
+  .cap p {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    line-height: 1.7;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .hint { display: none; }
+  @media (hover: hover) and (pointer: fine) { .hint { display: inline; } .hint-touch { display: none; } }
+
+  .controls {
+    position: fixed;
+    right: calc(max(16px, env(safe-area-inset-right, 0px)) + 12px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+  .cap p.coord { color: var(--ink); letter-spacing: 0.12em; }
+  .cap p.song { font-family: var(--display), var(--mono); font-size: 13px; letter-spacing: 0.1em; }
+  .topbar {
+    position: fixed;
+    top: calc(env(safe-area-inset-top, 0px) + 16px);
+    right: calc(max(16px, env(safe-area-inset-right, 0px)) + 8px);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+  }
+  /* The controls step back when you are just watching, and come forward as soon as you move */
+  .topbar, .controls { transition: opacity .9s ease; }
+  body.idle .topbar:not(:focus-within), body.idle .controls:not(:focus-within) { opacity: 0.28; }
+  .panel {
+    width: min(300px, calc(100vw - 56px));
+    padding: 18px 18px 14px;
+    border: 0;
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(14, 20, 36, 0.78), rgba(6, 9, 18, 0.86));
+    box-shadow: inset 0 1px 0 rgba(var(--moon-rgb), 0.28), 0 18px 40px -12px rgba(0, 0, 0, 0.6);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    display: grid;
+    gap: 10px;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .panel h2 {
+    margin: 0;
+    font-family: var(--display);
+    font-weight: 300;
+    font-size: 16px;
+    letter-spacing: 0.2em;
+    color: var(--ink);
+  }
+  .panel p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--dim); }
+  .panel .status { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: var(--ink); }
+  .panel #importClose { justify-self: end; margin-top: 2px; }
+  .imp-body { display: grid; gap: 8px; max-height: min(52vh, 420px); overflow-y: auto; overscroll-behavior: contain; }
+  .imp-body p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--dim); }
+  .imp-body code {
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    background: rgba(214, 222, 238, 0.08); padding: 1px 6px; border-radius: 4px; user-select: all;
+  }
+  .imp-body ol { margin: 0; padding-left: 1.3em; display: grid; gap: 4px; font-size: 13px; line-height: 1.6; color: var(--dim); }
+  .imp-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .imp-item, .imp-btn {
+    font: inherit; font-family: var(--ui); font-size: 13px; color: var(--ink); text-align: left; cursor: pointer;
+    background: rgba(214, 222, 238, 0.06); border: 0; border-radius: 8px;
+    padding: 8px 12px; transition: background-color .2s, color .2s, box-shadow .2s;
+  }
+  .imp-btn { font-size: 12px; letter-spacing: 0.04em; padding: 7px 12px; }
+  .imp-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: baseline; background: transparent; border-radius: 6px; }
+  .imp-item + .imp-item { box-shadow: inset 0 1px 0 rgba(214, 222, 238, 0.07); }
+  .imp-item span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .imp-item span:last-child { font-family: var(--ui); font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .imp-item:hover, .imp-btn:hover { background: rgba(var(--moon-rgb), 0.14); color: #fff; }
+  .imp-item:focus-visible, .imp-btn:focus-visible { outline: 1px solid rgba(var(--moon-rgb), 0.9); outline-offset: 2px; }
+  .imp-item[disabled], .imp-btn[disabled] { opacity: 0.45; cursor: default; }
+  .imp-small { font-size: 12px !important; }
+  .imp-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); cursor: pointer; }
+  .imp-check input { accent-color: var(--ink); width: 15px; height: 15px; margin: 0; }
+  /* Shown while files are dragged over the page */
+  .drop-hint {
+    position: fixed;
+    inset: 12px;
+    border: 1.5px dashed var(--ink);
+    border-radius: 18px;
+    background: rgba(10, 14, 26, 0.45);
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    z-index: 20;
+  }
+  .drop-hint p { margin: 0; font-family: var(--display); font-size: 22px; letter-spacing: 0.2em; color: var(--ink); }
+  .imp-current { border-left: 1px solid rgba(var(--moon-rgb), 0.7); padding-left: 10px; }
+  .imp-body a { color: var(--ink); }
+  /* Buttons as moonlit words: no frame, a soft halo so they read over bright sky, a line of light under the
+     word on hover, and a small moon before the word while a mode is on. They take the scene's light colour. */
+  .top-row { display: flex; gap: 18px; align-items: center; }
+  /* Immersive view (where real fullscreen is not allowed): only the white point stays */
+  body.immersive .controls { opacity: 0 !important; pointer-events: none; }
+  .fs-note {
+    position: fixed; top: calc(env(safe-area-inset-top, 0px) + 22px); right: calc(max(16px, env(safe-area-inset-right, 0px)) + 46px);
+    max-width: min(360px, calc(100% - 80px)); margin: 0; text-align: right;
+    font-family: var(--ui); font-size: 12px; line-height: 1.6; letter-spacing: 0.04em; color: rgba(var(--moon-rgb), 0.85);
+    text-shadow: 0 0 10px rgba(3, 5, 12, 0.95); pointer-events: none;
+    opacity: 0; transition: opacity .5s ease;
+  }
+  .fs-note.show { opacity: 1; }
+  /* The white point beside 歌单导入: tap it and a line of light runs down, carrying the extra controls */
+  .more { position: relative; display: flex; align-items: center; margin-left: -6px; }
+  #moreDot { width: 28px; height: 34px; padding: 0; border: 0; background: transparent; cursor: pointer; display: grid; place-items: center; border-radius: 50%; }
+  #moreDot span {
+    width: 7px; height: 7px; border-radius: 50%; background: #fff;
+    box-shadow: 0 0 6px 1px rgba(var(--moon-rgb), 0.85), 0 0 16px 2px rgba(var(--moon-rgb), 0.45);
+    animation: moreBreath 3.6s ease-in-out infinite;
+    transition: transform .3s ease;
+  }
+  #moreDot:hover span, #moreDot[aria-expanded="true"] span { transform: scale(1.35); }
+  #moreDot:focus-visible { outline: 1px solid rgba(var(--moon-rgb), 0.8); outline-offset: 0; }
+  @keyframes moreBreath { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+  .more-menu { position: absolute; top: 100%; right: 0; width: 28px; height: 0; pointer-events: none; }
+  .more-line {
+    position: absolute; top: -6px; right: 13.5px; width: 1px; height: var(--len, 80px);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(var(--moon-rgb), 0.55) 70%, rgba(var(--moon-rgb), 0));
+    box-shadow: 0 0 6px rgba(var(--moon-rgb), 0.7);
+    transform-origin: top; transform: scaleY(0);
+    transition: transform .45s cubic-bezier(.2, .7, .2, 1) .05s;
+  }
+  .more.open .more-line { transform: scaleY(1); transition-delay: 0s; }
+  #moreMenu > button {
+    position: absolute; right: 26px; white-space: nowrap;
+    opacity: 0; transform: translateX(8px); pointer-events: none;
+    transition: opacity .25s ease, transform .25s ease, color .25s, text-shadow .25s;
+  }
+  #more.open #moreMenu > button { opacity: 1; transform: none; pointer-events: auto; }
+  /* a short tick from each control to the line */
+  #moreMenu > button::before {
+    content: ""; position: absolute; top: 50%; right: -12.5px; width: 9px; height: 1px;
+    background: rgba(var(--moon-rgb), 0.75); box-shadow: 0 0 4px rgba(var(--moon-rgb), 0.6);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #moreDot span { animation: none; }
+    .more-line, #moreMenu > button { transition: opacity .2s; }
+  }
+  #toggle, #unlock, #seaview, #importBtn, #importClose, #replayBtn, #outroBtn, #fsBtn {
+    position: relative;
+    font-family: var(--ui);
+    font-size: 13px;
+    letter-spacing: 0.14em;
+    color: rgba(var(--moon-rgb), 0.72);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 4px 9px;
+    cursor: pointer;
+    text-shadow: 0 0 10px rgba(3, 5, 12, 0.9), 0 0 2px rgba(3, 5, 12, 0.8);
+    transition: color .25s, text-shadow .25s;
+  }
+  #toggle::after, #unlock::after, #seaview::after, #importBtn::after, #importClose::after, #replayBtn::after, #outroBtn::after, #fsBtn::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    right: calc(4px + 0.14em);              /* the letter-spacing trails the last character */
+    bottom: 3px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgb(var(--moon-rgb)) 25%, rgb(var(--moon-rgb)) 75%, transparent);
+    box-shadow: 0 0 6px rgba(var(--moon-rgb), 0.9);
+    transform: scaleX(0);
+    opacity: 0;
+    transition: transform .35s ease, opacity .35s ease;
+  }
+  #toggle:hover, #unlock:hover, #seaview:hover, #importBtn:hover, #importClose:hover, #replayBtn:hover, #outroBtn:hover, #fsBtn:hover,
+  #importBtn[aria-expanded="true"], #seaview[aria-pressed="true"] {
+    color: #fff;
+    text-shadow: 0 0 10px rgba(3, 5, 12, 0.9), 0 0 14px rgba(var(--moon-rgb), 0.55);
+  }
+  #toggle:hover::after, #unlock:hover::after, #seaview:hover::after, #importBtn:hover::after, #importClose:hover::after,
+  #replayBtn:hover::after, #outroBtn:hover::after, #fsBtn:hover::after, #importBtn[aria-expanded="true"]::after {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  #toggle:active, #unlock:active, #seaview:active, #importBtn:active, #importClose:active, #replayBtn:active, #outroBtn:active, #fsBtn:active { color: rgba(var(--moon-rgb), 0.9); }
+  #toggle:focus-visible, #unlock:focus-visible, #seaview:focus-visible, #importBtn:focus-visible, #importClose:focus-visible,
+  #replayBtn:focus-visible, #outroBtn:focus-visible, #fsBtn:focus-visible { outline: 1px solid rgba(var(--moon-rgb), 0.8); outline-offset: 2px; }
+  /* A mode that is on wears a small moon before its name */
+  #seaview[aria-pressed="true"]::before {
+    content: "";
+    position: absolute;
+    left: -10px;
+    top: 50%;
+    width: 5px;
+    height: 5px;
+    margin-top: -3px;
+    border-radius: 50%;
+    background: rgb(var(--moon-rgb));
+    box-shadow: 0 0 8px rgb(var(--moon-rgb));
+  }
+  @media (hover: none) {
+    #toggle, #unlock, #seaview, #importBtn, #importClose, #replayBtn, #outroBtn, #fsBtn { color: rgba(var(--moon-rgb), 0.88); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .topbar, .controls { transition: none; }
+    #toggle::after, #unlock::after, #seaview::after, #importBtn::after, #importClose::after, #replayBtn::after, #outroBtn::after, #fsBtn::after { transition: none; }
+  }
+
+  /* Sea-view player, gathered around the moon: the moon is play/pause, previous and next sit either side of
+     it, the progress line runs just under it. The page moves the whole group to the moon's screen position. */
+  .player {
+    --accent: var(--ink);
+    --mr: 40px;                       /* the moon's on-screen radius, set by the page */
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity .5s, visibility 0s linear .5s;
+  }
+  .player.on { opacity: 1; visibility: visible; transition: opacity .5s; }
+  .player.on > * { pointer-events: auto; }
+  .pl-icon {
+    position: absolute;
+    top: -19px;
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    filter: drop-shadow(0 0 6px rgba(214, 222, 238, 0.45));
+    transition: background-color .15s, border-color .15s, transform .15s;
+  }
+  .pl-prev { left: calc(-1 * var(--mr) - 62px); }
+  .pl-next { left: calc(var(--mr) + 24px); }
+  .pl-icon:hover { background: rgba(214, 222, 238, 0.1); border-color: var(--line); }
+  .pl-icon:active { transform: scale(0.94); }
+  .pl-icon:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  .pl-bar {
+    position: absolute;
+    left: -140px;
+    top: calc(var(--mr) + 16px);
+    width: 280px;
+    display: grid;
+    grid-template-columns: 2.8em minmax(0, 1fr) 2.8em;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 6px rgba(3, 5, 12, 0.9);
+  }
+  .pl-bar span:first-child { text-align: right; }
+  .pl-track { position: relative; height: 18px; cursor: pointer; touch-action: none; }
+  .pl-track::before, .pl-fill {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    height: 2px;
+    margin-top: -1px;
+    border-radius: 2px;
+  }
+  .pl-track::before { right: 0; background: var(--line); }
+  .pl-fill { width: 0; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .pl-knob {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 9px;
+    height: 9px;
+    margin: -4.5px 0 0 -4.5px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+    transform: scale(0.7);
+    transition: transform .15s;
+  }
+  .pl-track:hover .pl-knob, .pl-track.drag .pl-knob { transform: scale(1.25); }
+  .pl-track:focus-visible { outline: 1px solid var(--ink); outline-offset: 4px; border-radius: 4px; }
+  .pl-track.idle { cursor: default; opacity: 0.45; }
+  @media (prefers-reduced-motion: reduce) {
+    .player, .player.on { transition: none; }
+  }
+
+  @media (max-width: 520px) {
+    .cap { max-width: calc(100% - 130px); }
+    .cap h1 { letter-spacing: 0.22em; }
+  }
+</style>
+
+<div id="stage" aria-hidden="true"></div>
+<div id="veil" aria-live="polite"><p class="veil-hint">点击任意处，重新开始</p></div>
+
+<div class="cap">
+  <h1>月下方海</h1>
+  <p id="meta">正在铺设立方体…</p>
+  <p id="skyNote">天象 · 晴夜</p>
+  <p id="coord" class="coord" aria-live="polite" hidden></p>
+  <p id="song" class="coord song" aria-live="polite" hidden></p>
+</div>
+<div class="topbar">
+  <div class="top-row">
+    <button id="replayBtn" type="button" hidden>重播开场</button>
+    <div class="more" id="more">
+      <button id="moreDot" type="button" aria-expanded="false" aria-controls="moreMenu" aria-label="更多功能"><span></span></button>
+      <div class="more-menu" id="moreMenu" role="group" aria-label="更多功能">
+        <i class="more-line" aria-hidden="true"></i>
+        <button id="importBtn" type="button" aria-expanded="false" aria-controls="importPanel" tabindex="-1">歌单导入</button>
+        <button id="fsBtn" type="button" aria-pressed="false" title="全屏（F）" tabindex="-1">全屏</button>
+        <button id="outroBtn" type="button" tabindex="-1">退场</button>
+      </div>
+    </div>
+  </div>
+  <section id="importPanel" class="panel" role="dialog" aria-labelledby="importTitle" hidden>
+    <h2 id="importTitle">歌单导入</h2>
+    <p class="status" id="importStatus">把电脑里的音乐放到海面上</p>
+    <div class="imp-body" id="importBody"></div>
+    <button id="importClose" type="button">关闭</button>
+  </section>
+</div>
+<div class="player" id="player" aria-hidden="true">
+  <button id="plPrev" class="pl-icon pl-prev" type="button" aria-label="上一首" tabindex="-1">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="2" y="2.5" width="2" height="11" rx="0.6" fill="currentColor"/><path d="M14 2.8v10.4a.6.6 0 0 1-.92.5L5.4 8.5a.6.6 0 0 1 0-1l7.68-5.2a.6.6 0 0 1 .92.5z" fill="currentColor"/></svg>
+  </button>
+  <button id="plNext" class="pl-icon pl-next" type="button" aria-label="下一首" tabindex="-1">
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="12" y="2.5" width="2" height="11" rx="0.6" fill="currentColor"/><path d="M2 2.8v10.4a.6.6 0 0 0 .92.5l7.68-5.2a.6.6 0 0 0 0-1L2.92 2.3a.6.6 0 0 0-.92.5z" fill="currentColor"/></svg>
+  </button>
+  <div class="pl-bar">
+    <span id="plCur">0:00</span>
+    <div class="pl-track" id="plTrack" role="slider" tabindex="-1" aria-label="播放进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0">
+      <div class="pl-fill" id="plFill"></div>
+      <div class="pl-knob" id="plKnob"></div>
+    </div>
+    <span id="plDur">0:00</span>
+  </div>
+</div>
+<p class="fs-note" id="fsNote" role="status" aria-live="polite"></p>
+<div class="controls">
+  <button id="unlock" type="button" hidden>返回海面 · Esc</button>
+  <button id="seaview" type="button" aria-pressed="false" hidden>观海模式</button>
+  <button id="toggle" type="button" aria-pressed="false">暂停</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  const stage = document.getElementById('stage');
+  const meta = document.getElementById('meta');
+  const toggle = document.getElementById('toggle');
+
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const small = Math.min(innerWidth, innerHeight) < 700 || matchMedia('(pointer: coarse)').matches;
+
+  // ---- Sea grid ----
+  const COLS = small ? 130 : 200;
+  const ROWS = small ? 112 : 150;
+  const GAP = 1.0;
+  const SIZE = 0.8;
+  const COUNT = COLS * ROWS;
+
+  // Moon sits low over the far edge so its path runs straight at the viewer
+  const MOON_ELEV = 12.4;
+  const e = MOON_ELEV * Math.PI / 180;
+  const moonDir = new THREE.Vector3(0, Math.sin(e), -Math.cos(e)).normalize();
+
+  // Swell components: [direction in degrees from +z, wavelength, amplitude]
+  // Calm night swell: longer, lower and slower than open-sea waves
+  const WAVES = [
+    [  8, 30.0, 0.48],
+    [-28, 16.0, 0.22],
+    [ 40, 10.0, 0.11],
+    [-60,  6.4, 0.055],
+    [ 15,  3.8, 0.028]
+  ];
+  const SWELL_SPEED = 0.34;
+
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+  } catch (err) {
+    meta.textContent = '此设备无法启用 WebGL，动效无法显示。';
+    toggle.hidden = true;
+    return;
+  }
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, small ? 1.75 : 2));
+  renderer.setClearColor(0x131a2b, 1);
+  stage.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x131a2b, 0.0115);
+
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1200);
+  const camBase = new THREE.Vector3(0, 6.5, 22);
+  camera.position.copy(camBase);
+
+  // ---- Lights ----
+  const moonLight = new THREE.DirectionalLight(0xb9c7ee, 0.95);
+  moonLight.position.copy(moonDir).multiplyScalar(100);
+  scene.add(moonLight);
+  const hemi = new THREE.HemisphereLight(0x2c3d6a, 0x05070f, 0.75);
+  scene.add(hemi);
+  const fill = new THREE.DirectionalLight(0x22305a, 0.35);
+  fill.position.set(0, 4, 30);
+  scene.add(fill);
+
+  // ---- Shared uniforms ----
+  const U = {
+    uTime: { value: 0 },
+    uMoonDir: { value: moonDir.clone() },
+    uPR: { value: renderer.getPixelRatio() },
+    uSpot: { value: 0 },
+    uAurora: { value: 0 },          // sky phenomena, eased 0..1
+    uCloud: { value: 0 },
+    // Scene tone (eased toward the playing song's palette)
+    uHorizon: { value: new THREE.Color(0.075, 0.102, 0.169) },
+    uZenith: { value: new THREE.Color(0.010, 0.016, 0.040) },
+    uLightCol: { value: new THREE.Color(0.80, 0.87, 1.0) },
+    // Music: ripple ring buffer in audio time, focus cube, countdown glow, loudness
+    uAudioT: { value: 0 },
+    // each ripple: x = start (audio time), y = strength, zw = origin on the sea
+    uRip: { value: Array.from({ length: 12 }, () => new THREE.Vector4(-100, 0, 9999, 9999)) },
+    uRipOn: { value: 0 },
+    uFocusPos: { value: new THREE.Vector2(9999, 9999) },
+    uGlow: { value: 0 },
+    uLevel: { value: 0 },
+    // Moon as a play/pause control in sea view
+    uMoonHover: { value: 0 },
+    uMoonPhase: { value: 0 },     // 0 full moon (music on) → 1 thin crescent (music paused)
+    uMoonPulse: { value: 99 },    // seconds since the last tap on the moon
+    uMoonGlyph: { value: 0 },     // 0 shows a pause mark on hover, 1 a play mark
+    // Lyric face: which cube is steered, its held yaw/tilt and how strongly (0..1)
+    uHoldPos: { value: new THREE.Vector2(9999, 9999) },
+    uHoldYaw: { value: 0 },
+    uHoldTilt: { value: 0 },
+    uHoldW: { value: 0 },
+    uEdgeOn: { value: 1 },         // hover edge glow: on in the main view, off once a cube is locked
+    uGreyOn: { value: 0 },         // library view: song cubes in cover colours, the rest greyed (only while nothing plays)
+    uIntro: { value: 1 },          // opening: 0 = sea folded into its middle, 1 = fully laid out
+    uIntroC: { value: new THREE.Vector2(0, -20) },   // where the sea unfolds from: the middle of the opening view
+    uCat: { value: 0 },            // easter egg: 0 = sea, 1 = every cube gathered into the cat
+    uOutro: { value: 0 },          // closing: 0 = sea, 1 = every cube gathered into the centre cube
+    uOutroCore: { value: 0 },      // closing: the centre cube going out
+    uFocusEdge: { value: 0 }       // edge glow on the locked cube itself, faded out after the click
+  };
+
+  // ---- Sky dome with moon disc and halo ----
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      uMoonDir: U.uMoonDir, uHorizon: U.uHorizon, uZenith: U.uZenith, uHalo: U.uLightCol,
+      uMoonHover: U.uMoonHover, uMoonPhase: U.uMoonPhase, uMoonPulse: U.uMoonPulse, uMoonGlyph: U.uMoonGlyph,
+      uTime: U.uTime, uAurora: U.uAurora, uCloud: U.uCloud
+    },
+    vertexShader: `
+      varying vec3 vDir;
+      void main(){
+        vDir = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      uniform vec3 uMoonDir;
+      uniform vec3 uHorizon;
+      uniform vec3 uZenith;
+      uniform vec3 uHalo;
+      uniform float uMoonHover;
+      uniform float uMoonPhase;
+      uniform float uMoonPulse;
+      uniform float uMoonGlyph;
+      uniform float uTime;
+      uniform float uAurora;
+      uniform float uCloud;
+      varying vec3 vDir;
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float n2(vec2 p){
+        vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+        float a = hash(i), b = hash(i+vec2(1.0,0.0)), c = hash(i+vec2(0.0,1.0)), d = hash(i+vec2(1.0,1.0));
+        return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+      }
+      void main(){
+        vec3 dir = normalize(vDir);
+        vec3 horizon = uHorizon;
+        vec3 zenith  = uZenith;
+        float y = clamp(dir.y, 0.0, 1.0);
+        // Gradient that leaves the horizon gently (flat at the bottom), so there is no crease where sky meets sea
+        vec3 col = mix(horizon, zenith, pow(smoothstep(0.0, 0.75, y), 0.6));
+        // Low sea mist: a soft bright band just above the water, a little warmer toward the moon's bearing
+        vec2 dXZ = normalize(dir.xz + vec2(1e-5)), mXZ = normalize(uMoonDir.xz + vec2(1e-5));
+        float toward = pow(max(dot(dXZ, mXZ), 0.0), 6.0);
+        float mist = exp(-y * 16.0);
+        col += horizon * 0.3 * mist + uHalo * 0.035 * toward * exp(-y * 9.0);
+
+        // Aurora: soft curtains low in the sky that sway slowly, combed with fine vertical rays
+        if (uAurora > 0.001 && dir.y > 0.0) {
+          float az = atan(dir.x, -dir.z);
+          float base = 0.06 + 0.08 * n2(vec2(az * 1.6 - uTime * 0.035, 3.7));
+          float h = dir.y - base;
+          float rays = 0.55 + 0.45 * n2(vec2(az * 38.0 + uTime * 0.25, uTime * 0.08));
+          float sway = n2(vec2(az * 2.4 + uTime * 0.05, uTime * 0.02 + 9.1));
+          float band = smoothstep(-0.01, 0.025, h) * exp(-max(h, 0.0) * 6.5) * rays * smoothstep(0.25, 0.75, sway);
+          vec3 aCol = mix(vec3(0.25, 1.0, 0.7), uHalo, 0.35);
+          aCol = mix(aCol, vec3(0.75, 0.38, 1.0), smoothstep(0.08, 0.3, h));   // violet fringes on top
+          col += aCol * band * uAurora * 0.6;
+        }
+
+        float d = max(dot(dir, uMoonDir), 0.0);
+        float front = step(0.0, dot(dir, uMoonDir));
+        // Halo dims as the moon wanes to a crescent, brightens under the pointer
+        float haloK = mix(1.0, 0.42, uMoonPhase) * (1.0 + 0.7 * uMoonHover);
+        col += uHalo * 0.78 * haloK * (pow(d, 900.0)*0.40 + pow(d, 70.0)*0.13 + pow(d, 8.0)*0.05);
+
+        vec3 t1 = normalize(cross(uMoonDir, vec3(0.0, 1.0, 0.0)));
+        vec3 t2 = cross(t1, uMoonDir);
+        vec2 uv = vec2(dot(dir, t1), dot(dir, t2)) / 0.0384;
+        float r = length(uv);
+
+        // A ring of light spreads from the moon each time it is tapped
+        float pr = 1.05 + uMoonPulse * 5.5;
+        float q1 = (r - pr) * 1.5;
+        col += uHalo * front * 0.42 * exp(-q1 * q1) * exp(-uMoonPulse * 2.0);
+        // Thin rim while hovered, so the moon reads as something to press
+        float q2 = (r - 1.16) * 8.0;
+        col += uHalo * front * uMoonHover * 0.4 * exp(-q2 * q2);
+
+        if (front > 0.0 && r < 1.02) {
+          float mare = n2(uv*2.6+3.1)*0.6 + n2(uv*6.0+9.7)*0.3 + n2(uv*14.0)*0.1;
+          vec3 moon = vec3(0.93, 0.95, 0.99) * (0.80 + 0.20*smoothstep(0.38, 0.68, mare));
+          moon *= 0.84 + 0.16*sqrt(max(0.0, 1.0 - r*r));
+          // Phase: an earth-shadow disc slides across, leaving a crescent while the music rests
+          float off = mix(2.3, 0.42, uMoonPhase);
+          float sh = 1.0 - smoothstep(0.95, 1.03, length(uv - vec2(off, 0.04)));
+          moon = mix(moon, moon * 0.10 + uHorizon * 0.5, sh * smoothstep(0.0, 0.06, uMoonPhase));
+          // Hover mark: what a tap will do (pause bars, or a play triangle)
+          float glyph;
+          if (uMoonGlyph < 0.5) {
+            glyph = (1.0 - step(0.08, abs(abs(uv.x) - 0.2))) * (1.0 - step(0.36, abs(uv.y)));
+          } else {
+            glyph = step(-0.3, uv.x) * (1.0 - step(0.35, uv.x)) * (1.0 - step(0.36 * (0.35 - uv.x) / 0.65, abs(uv.y)));
+          }
+          moon = mix(moon, moon * 0.4, glyph * uMoonHover * 0.9);
+          col = mix(col, moon, 1.0 - smoothstep(0.965, 1.0, r));
+        }
+        // Drifting clouds: thin wisps sliding across, silvered where the moon is behind them
+        if (uCloud > 0.001 && dir.y > 0.0) {
+          vec2 cp = dir.xz / (dir.y + 0.12) * 1.6 + vec2(uTime * 0.035, uTime * 0.012);
+          float cl = n2(cp) * 0.55 + n2(cp * 2.1 + 4.3) * 0.3 + n2(cp * 4.7 + 1.1) * 0.15;
+          cl = smoothstep(0.5, 0.8, cl) * smoothstep(0.0, 0.12, dir.y);
+          vec3 cCol = horizon * 1.5 + uHalo * (0.06 + 0.55 * pow(d, 30.0));
+          col = mix(col, cCol, cl * uCloud * 0.85);
+        }
+        // Below the horizon (beyond the end of the sea) the mist simply continues, matching the fog colour
+        if (dir.y < 0.0) col = horizon * 1.3 + uHalo * 0.035 * toward;
+        gl_FragColor = vec4(col, 1.0);
+      }`
+  });
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(500, 48, 24), skyMat);
+  sky.renderOrder = -2;
+  scene.add(sky);
+
+  // ---- Stars ----
+  const STARS = small ? 1600 : 2900;              // a full sphere: the sky turns, so stars rise and set
+  const sPos = new Float32Array(STARS * 3);
+  const sSeed = new Float32Array(STARS);
+  const sSize = new Float32Array(STARS);
+  const tmp = new THREE.Vector3();
+  for (let i = 0; i < STARS; i++) {
+    const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2;
+    const sq = Math.sqrt(1 - u * u);
+    tmp.set(sq * Math.cos(th), u, sq * Math.sin(th));
+    tmp.multiplyScalar(450);
+    sPos.set([tmp.x, tmp.y, tmp.z], i * 3);
+    sSeed[i] = Math.random();
+    sSize[i] = Math.random() < 0.06 ? 2.6 + Math.random() * 1.4 : 1.0 + Math.random() * 1.2;
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(sPos, 3));
+  starGeo.setAttribute('aSeed', new THREE.BufferAttribute(sSeed, 1));
+  starGeo.setAttribute('aSize', new THREE.BufferAttribute(sSize, 1));
+  const starMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
+    uniforms: { uTime: U.uTime, uPR: U.uPR, uMoonPhase: U.uMoonPhase, uMoonDir: U.uMoonDir },
+    vertexShader: `
+      attribute float aSeed; attribute float aSize;
+      uniform float uTime; uniform float uPR; uniform float uMoonPhase; uniform vec3 uMoonDir;
+      varying float vA;
+      void main(){
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec3 wd = normalize(mat3(modelMatrix) * position);    // where the turning sky has carried this star
+        float tw = 0.62 + 0.38*sin(uTime*(0.5 + aSeed*2.4) + aSeed*40.0);
+        // With the moon waned, the stars come out a little more
+        vA = tw * smoothstep(0.02, 0.30, wd.y) * (0.45 + 0.55*aSeed) * (1.0 + 0.6 * uMoonPhase);
+        vA *= 1.0 - smoothstep(0.996, 0.9985, dot(wd, uMoonDir));   // hidden behind the moon's disc
+        gl_PointSize = aSize * uPR;
+      }`,
+    fragmentShader: `
+      varying float vA;
+      void main(){
+        float d = length(gl_PointCoord - 0.5);
+        gl_FragColor = vec4(vec3(0.80, 0.86, 1.0), smoothstep(0.5, 0.0, d) * vA);
+      }`
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  stars.renderOrder = -1;
+  scene.add(stars);
+
+  // ================= Sky phenomena =================
+  // The star sphere turns slowly about a pole behind the viewer; on top of that the sky cycles through
+  // quiet spells and featured events: a meteor shower, aurora, drifting cloud, or a constellation drawn
+  // star by star. Lone shooting stars cross now and then in any spell.
+  const POLE = new THREE.Vector3(0, 0.6, 0.8).normalize();
+  const SKY_TURN = 0.006;                         // rad/s: a slow, visible wheel
+  let skyAngle = 0;
+
+  // ---- Constellations: short chains through neighbouring stars, kept on the star sphere ----
+  const CONST_N = 3;
+  const constV = [], constOrder = [], constGroup = [], constCount = [], constSeed = [];
+  const starDir = (k) => new THREE.Vector3(sPos[k * 3], sPos[k * 3 + 1], sPos[k * 3 + 2]).normalize();
+  for (let g = 0; g < CONST_N; g++) {
+    // seed on a bright star that starts out well up in the sky, in front of the viewer
+    let seed = -1;
+    for (let tries = 0; tries < 400 && seed < 0; tries++) {
+      const k = Math.floor(Math.random() * STARS), v = starDir(k);
+      if (sSize[k] > 2.0 && v.y > 0.3 && v.z < 0.2 && v.dot(moonDir) < 0.95) seed = k;
+    }
+    if (seed < 0) continue;
+    const chain = [seed], used = new Set([seed]);
+    const len = 5 + Math.floor(Math.random() * 3);
+    while (chain.length < len) {
+      const cur = starDir(chain[chain.length - 1]);
+      let best = -1, bestD = 1e9;
+      for (let k = 0; k < STARS; k++) {
+        if (used.has(k) || sSize[k] < 1.5) continue;
+        const a = cur.angleTo(starDir(k));
+        if (a > 0.05 && a < 0.24 && a < bestD) { bestD = a; best = k; }
+      }
+      if (best < 0) break;
+      chain.push(best); used.add(best);
+      sSize[best] = Math.max(sSize[best], 2.2);   // stars that belong to a figure shine a little brighter
+    }
+    for (let k = 0; k + 1 < chain.length; k++) {
+      [chain[k], chain[k + 1]].forEach((id, e) => {
+        constV.push(sPos[id * 3], sPos[id * 3 + 1], sPos[id * 3 + 2]);
+        constOrder.push(k + e);                  // start vertex k, end vertex k+1: the line draws itself
+        constGroup.push(g);
+      });
+    }
+    constCount[g] = chain.length - 1;
+    constSeed[g] = seed;
+  }
+  starGeo.attributes.aSize.needsUpdate = true;
+  const constGeo = new THREE.BufferGeometry();
+  constGeo.setAttribute('position', new THREE.Float32BufferAttribute(constV, 3));
+  constGeo.setAttribute('aOrder', new THREE.Float32BufferAttribute(constOrder, 1));
+  constGeo.setAttribute('aGroup', new THREE.Float32BufferAttribute(constGroup, 1));
+  const constMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
+    uniforms: { uDraw: { value: 0 }, uAlpha: { value: 0 }, uWhich: { value: 0 }, uCol: U.uLightCol },
+    vertexShader: `
+      attribute float aOrder; attribute float aGroup;
+      uniform float uDraw; uniform float uAlpha; uniform float uWhich;
+      varying float vA;
+      void main(){
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec3 wd = normalize(mat3(modelMatrix) * position);
+        vA = uAlpha * (1.0 - step(0.5, abs(aGroup - uWhich))) * clamp(uDraw - aOrder + 1.0, 0.0, 1.0)
+           * smoothstep(0.02, 0.2, wd.y);
+      }`,
+    fragmentShader: `
+      uniform vec3 uCol;
+      varying float vA;
+      void main(){ gl_FragColor = vec4(mix(uCol, vec3(1.0), 0.5) * 0.55, vA); }`
+  });
+  const constLines = new THREE.LineSegments(constGeo, constMat);
+  constLines.frustumCulled = false;
+  stars.add(constLines);                         // turns with the stars
+
+  // ---- Shooting stars: camera-facing streaks travelling along great circles ----
+  const MET_N = 12;
+  const metPos = new Float32Array(MET_N * 4 * 3);
+  const metA = new Float32Array(MET_N * 4);
+  const metIdx = [];
+  for (let k = 0; k < MET_N; k++) { const b = k * 4; metIdx.push(b, b + 1, b + 2, b + 2, b + 1, b + 3); }
+  const metGeo = new THREE.BufferGeometry();
+  metGeo.setAttribute('position', new THREE.BufferAttribute(metPos, 3).setUsage(THREE.DynamicDrawUsage));
+  metGeo.setAttribute('aA', new THREE.BufferAttribute(metA, 1).setUsage(THREE.DynamicDrawUsage));
+  metGeo.setIndex(metIdx);
+  const metMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    uniforms: { uCol: U.uLightCol },
+    vertexShader: `
+      attribute float aA; varying float vA;
+      void main(){ vA = aA; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `
+      uniform vec3 uCol; varying float vA;
+      void main(){ gl_FragColor = vec4(mix(uCol, vec3(1.0), 0.6) * vA, vA); }`
+  });
+  const meteors = new THREE.Mesh(metGeo, metMat);
+  meteors.frustumCulled = false;
+  meteors.renderOrder = 0;
+  scene.add(meteors);
+  const metPool = Array.from({ length: MET_N }, () => ({ on: false, t: 0, life: 1, d0: new THREE.Vector3(), axis: new THREE.Vector3(), speed: 0.4, len: 0.15, w: 1 }));
+  const UPV = new THREE.Vector3(0, 1, 0);
+  const vH = new THREE.Vector3(), vT = new THREE.Vector3(), vS = new THREE.Vector3(), vTan = new THREE.Vector3(), vDn = new THREE.Vector3();
+  let radiant = new THREE.Vector3(0, 0.8, -0.6).normalize();
+
+  function launchMeteor(fromRadiant) {
+    const m = metPool.find((q) => !q.on);
+    if (!m) return;
+    if (fromRadiant) {
+      // Shower: start a little away from the radiant and fly directly away from it
+      const off = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).cross(radiant).normalize();
+      m.d0.copy(radiant).applyAxisAngle(off, 0.08 + Math.random() * 0.35);
+      vTan.copy(m.d0).multiplyScalar(m.d0.dot(radiant)).sub(radiant).normalize();
+    } else {
+      // Lone meteor: somewhere ahead and high, falling at a slant
+      const az = (Math.random() - 0.5) * 2.2, el = 0.45 + Math.random() * 0.6;
+      m.d0.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
+      vDn.copy(m.d0).multiplyScalar(m.d0.dot(UPV)).sub(UPV).normalize();
+      vS.copy(m.d0).cross(vDn).normalize();
+      vTan.copy(vDn).multiplyScalar(0.6).addScaledVector(vS, (Math.random() < 0.5 ? -1 : 1) * 0.8).normalize();
+    }
+    m.axis.copy(m.d0).cross(vTan).normalize();
+    m.speed = 0.35 + Math.random() * 0.3;          // rad/s along the sky
+    m.len = 0.1 + Math.random() * 0.12;            // tail length, radians
+    m.life = 0.6 + Math.random() * 0.7;
+    m.w = 0.55 + Math.random() * 0.5;
+    m.t = 0;
+    m.on = true;
+  }
+
+  function updateMeteors(dt) {
+    for (let k = 0; k < MET_N; k++) {
+      const m = metPool[k], b = k * 4;
+      if (m.on) { m.t += dt; if (m.t >= m.life) m.on = false; }
+      if (!m.on) { for (let j = 0; j < 4; j++) metA[b + j] = 0; continue; }
+      const env = Math.min(1, m.t / 0.12) * Math.min(1, (m.life - m.t) / 0.3);
+      const travel = m.speed * m.t;
+      vH.copy(m.d0).applyAxisAngle(m.axis, travel);
+      vT.copy(m.d0).applyAxisAngle(m.axis, Math.max(0, travel - m.len * Math.min(1, m.t / 0.25)));
+      vS.copy(vH).sub(vT).cross(vH).normalize();
+      const R = 340, wH = 0.75 * m.w, wT = 0.12 * m.w;
+      metPos.set([vH.x * R + vS.x * wH, vH.y * R + vS.y * wH, vH.z * R + vS.z * wH], b * 3);
+      metPos.set([vH.x * R - vS.x * wH, vH.y * R - vS.y * wH, vH.z * R - vS.z * wH], b * 3 + 3);
+      metPos.set([vT.x * R + vS.x * wT, vT.y * R + vS.y * wT, vT.z * R + vS.z * wT], b * 3 + 6);
+      metPos.set([vT.x * R - vS.x * wT, vT.y * R - vS.y * wT, vT.z * R - vS.z * wT], b * 3 + 9);
+      const fadeLow = Math.min(1, Math.max(0, (vH.y - 0.03) / 0.12));   // vanish as they reach the horizon
+      metA[b] = metA[b + 1] = env * fadeLow;
+      metA[b + 2] = metA[b + 3] = 0;
+    }
+    metGeo.attributes.position.needsUpdate = true;
+    metGeo.attributes.aA.needsUpdate = true;
+  }
+
+  // ---- The schedule: quiet spells between featured events ----
+  const SKY_EVENTS = [
+    { key: 'meteors', name: '流星雨', dur: [18, 26] },
+    { key: 'aurora', name: '极光', dur: [30, 40] },
+    { key: 'clouds', name: '流云', dur: [30, 42] },
+    { key: 'const', name: '星座', dur: [20, 26] }
+  ];
+  let skyEvent = null, skyTimer = 12, skyLast = '', loneTimer = 5, showerTimer = 0, constWhich = 0, constDraw = 0;
+  const skyNote = document.getElementById('skyNote');
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  function setSkyNote() { skyNote.textContent = '天象 · ' + (skyEvent ? skyEvent.name : '晴夜'); }
+
+  function updateSky(dt) {
+    skyAngle += dt * SKY_TURN;
+    stars.quaternion.setFromAxisAngle(POLE, skyAngle);
+
+    skyTimer -= dt;
+    if (skyTimer <= 0) {
+      if (!skyEvent) {
+        const pool = SKY_EVENTS.filter((e) => e.key !== skyLast && (e.key !== 'const' || constCount.length));
+        skyEvent = pool[Math.floor(Math.random() * pool.length)];
+        skyTimer = rnd(skyEvent.dur[0], skyEvent.dur[1]);
+        if (skyEvent.key === 'meteors') {
+          const az = (Math.random() - 0.5) * 1.6, el = 0.8 + Math.random() * 0.45;
+          radiant.set(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
+        }
+        if (skyEvent.key === 'const') {
+          // The sky has turned since the figures were chosen: draw the one standing highest right now
+          let bestY = -2;
+          constSeed.forEach((sd, g) => {
+            if (sd === undefined) return;
+            const y = starDir(sd).applyQuaternion(stars.quaternion).y;
+            if (y > bestY) { bestY = y; constWhich = g; }
+          });
+          constDraw = 0;
+        }
+      } else {
+        skyLast = skyEvent.key;
+        skyEvent = null;
+        skyTimer = rnd(18, 34);
+      }
+      setSkyNote();
+    }
+    const key = skyEvent ? skyEvent.key : '';
+    const ease = (u, target, rate) => u.value + (target - u.value) * (1 - Math.exp(-dt * rate));
+    U.uAurora.value = ease(U.uAurora, key === 'aurora' ? 1 : 0, 0.35);
+    U.uCloud.value = ease(U.uCloud, key === 'clouds' ? 1 : 0, 0.3);
+
+    // Constellation: lines drawn star to star, held, then faded together
+    if (key === 'const') constDraw += dt * 1.4;
+    constMat.uniforms.uWhich.value = constWhich;
+    constMat.uniforms.uDraw.value = constDraw;
+    constMat.uniforms.uAlpha.value = ease(constMat.uniforms.uAlpha, key === 'const' ? 1 : 0, key === 'const' ? 3 : 0.8);
+
+    loneTimer -= dt;
+    if (loneTimer <= 0) { launchMeteor(false); loneTimer = rnd(6, 14); }
+    if (key === 'meteors') {
+      showerTimer -= dt;
+      if (showerTimer <= 0) { launchMeteor(true); showerTimer = rnd(0.25, 0.8); }
+    }
+    updateMeteors(dt);
+  }
+
+  // ---- Cube ocean: positions live on the GPU, waves computed per instance in the vertex shader ----
+  const waveGLSL = WAVES.map(([deg, L, A]) => {
+    const a = deg * Math.PI / 180;
+    const k = (2 * Math.PI / L);
+    const w = Math.sqrt(9.8 * k) * SWELL_SPEED;
+    return `r += sw(p, vec2(${Math.sin(a).toFixed(5)}, ${Math.cos(a).toFixed(5)}), ${k.toFixed(5)}, ${A.toFixed(4)}, ${w.toFixed(5)}, t);`;
+  }).join('\n');
+
+  const cubeMat = new THREE.MeshStandardMaterial({ color: 0x2b4470, roughness: 0.62, metalness: 0.12 });
+  cubeMat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = U.uTime;
+    shader.uniforms.uMoonDir = U.uMoonDir;
+    shader.uniforms.uSpot = U.uSpot;
+    ['uLightCol', 'uAudioT', 'uRip', 'uRipOn', 'uFocusPos', 'uGlow', 'uLevel', 'uMoonPhase', 'uHoldPos', 'uHoldYaw', 'uHoldTilt', 'uHoldW', 'uEdgeOn', 'uFocusEdge', 'uGreyOn', 'uIntro', 'uIntroC', 'uCat', 'uOutro', 'uOutroCore'].forEach((k) => { shader.uniforms[k] = U[k]; });
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        uniform float uTime;
+        uniform vec3 uMoonDir;
+        uniform float uSpot;
+        uniform float uAudioT;
+        uniform vec4 uRip[12];
+        uniform float uMoonPhase;
+        uniform float uRipOn;
+        uniform vec2 uFocusPos;
+        uniform float uIntro;
+        uniform float uCat;
+        uniform float uOutro;
+        uniform float uOutroCore;
+        varying float vOutroGlow;
+        attribute vec4 aCat;          // xyz: this cube's place in the cat (world), w: when it sets off (0..1)
+        attribute vec3 aCatCol;
+        varying float vCatE;
+        varying vec3 vCatCol;
+        uniform vec2 uIntroC;
+        uniform vec2 uHoldPos;
+        uniform float uHoldYaw;
+        uniform float uHoldTilt;
+        uniform float uHoldW;
+        uniform float uEdgeOn;
+        uniform float uFocusEdge;
+        varying vec3 vLocal;
+        varying float vEdge;
+        varying float vHoldF;
+        attribute float aLift;
+        attribute float aSpin;
+        attribute float aTrack;
+        varying float vTrack;
+        varying float vGlint;
+        varying float vTop;
+        varying float vH;
+        varying float vLift;
+        varying float vRip;
+        varying float vFocus;
+        float hash1(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        vec3 sw(vec2 p, vec2 d, float k, float A, float w, float t){
+          float ph = k * dot(d, p) - w * t;
+          float c = cos(ph);
+          return vec3(A * sin(ph), A * k * c * d.x, A * k * c * d.y);
+        }
+        vec3 waveH(vec2 p, float t){
+          vec3 r = vec3(0.0);
+          ${waveGLSL}
+          return r;
+        }
+        mat3 rotUp(vec3 n){
+          vec3 v = vec3(n.z, 0.0, -n.x);
+          float c = n.y;
+          float k = 1.0 / (1.0 + c);
+          return mat3(
+            v.x*v.x*k + c,   v.y*v.x*k + v.z, v.z*v.x*k - v.y,
+            v.x*v.y*k - v.z, v.y*v.y*k + c,   v.z*v.y*k + v.x,
+            v.x*v.z*k + v.y, v.y*v.z*k - v.x, v.z*v.z*k + c
+          );
+        }`)
+      .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+        vec2 ip = vec2(instanceMatrix[3][0], instanceMatrix[3][2]);
+        vec3 wv = waveH(ip, uTime);
+        vH = wv.x;
+        vec3 wn = normalize(vec3(-wv.y, 1.0, -wv.z));
+        vLift = aLift;
+        vTrack = aTrack;
+        // A lifted cube levels out, tips onto an edge and turns slowly
+        mat3 R = rotUp(normalize(mix(vec3(-wv.y*0.75, 1.0, -wv.z*0.75), vec3(0.0, 1.0, 0.0), aLift)));
+        // (spin phase uses a plain fract() so the page can reproduce it exactly for the lyric face)
+        // Spin angle is accumulated per cube on the page (only while it is lifted), so it never
+        // depends on how long the page has been open
+        float sa = aSpin;
+        float ta = aLift * 0.42;
+        // The singing cube with lyrics is steered from the page: it turns one face to the camera and holds it
+        float hold = (1.0 - step(0.3, length(ip - uHoldPos))) * uHoldW;
+        sa = mix(sa, uHoldYaw, hold);
+        ta = mix(ta, uHoldTilt, hold);
+        vHoldF = hold;
+        mat3 S = mat3(cos(sa), 0.0, -sin(sa),  0.0, 1.0, 0.0,  sin(sa), 0.0, cos(sa));
+        mat3 T = mat3(1.0, 0.0, 0.0,  0.0, cos(ta), sin(ta),  0.0, -sin(ta), cos(ta));
+        mat3 M = R * T * S;
+        float catP = clamp((uCat - aCat.w * 0.55) / 0.45, 0.0, 1.0);
+        float catE = catP * catP * (3.0 - 2.0 * catP);
+        vCatE = catE;
+        vCatCol = aCatCol;
+        vTop = objectNormal.y;
+        objectNormal = normalize(mix(M * objectNormal, objectNormal, catE));   // square to the world inside the cat
+
+        vec3 wp = vec3(ip.x, wv.x, ip.y);
+        vec3 Vd = normalize(cameraPosition - wp);
+        vec3 Hd = normalize(uMoonDir + Vd);
+        float spec = pow(max(dot(wn, Hd), 0.0), 80.0);
+        float s1 = hash1(ip);
+        float s2 = hash1(ip + 17.31);
+        float tw = 0.5 + 0.5 * sin(uTime * (1.8 + s1 * 5.5) + s2 * 6.2831);
+        tw = tw * tw * tw;
+        vGlint = (1.0 - catE) * 0.16 * (spec * (0.25 + 2.9 * tw) + pow(tw, 14.0) * 0.06 * step(0.9, s1)) * (1.0 - 0.7 * aLift) * (1.0 - 0.5 * uSpot) * (1.0 - 0.5 * uMoonPhase);
+
+        // Rings spreading out from the singing cube, one per beat
+        float dd = length(ip - uFocusPos);
+        vFocus = 1.0 - step(0.3, dd);
+        // Edge glow follows the hover lift on the main view; the locked cube never gets it
+        vLocal = position;
+        // The cube being locked fades its own edges out (uFocusEdge) instead of losing them at once
+        vEdge = aLift * mix(uEdgeOn, uFocusEdge, vFocus) * (1.0 - catE);
+        float rip = 0.0;
+        if (uRipOn > 0.001) {
+          for (int k = 0; k < 12; k++) {
+            float age = uAudioT - uRip[k].x;
+            if (age > 0.0 && age < 5.5) {
+              // each ring keeps its own centre, so rings from a previous cube finish where they began
+              float x = length(ip - uRip[k].zw) - 0.6 - age * 7.0;
+              rip += uRip[k].y * exp(-x * x * 0.55) * (1.0 - age / 5.5) * (1.0 - age / 5.5);
+            }
+          }
+          rip *= uRipOn * (1.0 - vFocus);
+        }
+        vRip = rip;`)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        transformed = M * transformed;
+        // Opening: the sea unfolds from the middle outward; each cube rises from below the water and grows into place
+        float iD = clamp(length(ip - uIntroC) / 150.0, 0.0, 1.0);
+        float iP = clamp((uIntro * 1.35 - iD) / 0.35, 0.0, 1.0);
+        float iE = iP * iP * (3.0 - 2.0 * iP);
+        transformed *= iE;
+        transformed.xz += (uIntroC - ip) * (1.0 - iE) * 0.3;
+        transformed.y -= (1.0 - iE) * 1.6;
+        // Closing: the sea draws back into its centre cube, farthest cubes first, each shrinking as it arrives;
+        // the centre cube brightens as they gather, then goes out
+        vOutroGlow = 0.0;
+        if (uOutro > 0.0) {
+          float oDist = length(ip - uIntroC);
+          if (oDist < 0.3) {
+            transformed *= 1.0 - smoothstep(0.0, 1.0, uOutroCore);
+            vOutroGlow = smoothstep(0.2, 1.0, uOutro) * (1.0 - uOutroCore);
+          } else {
+            float oD = clamp(oDist / 150.0, 0.0, 1.0);
+            float oP = clamp((uOutro * 1.3 - (1.0 - oD)) / 0.3, 0.0, 1.0);
+            float oE = oP * oP * (3.0 - 2.0 * oP);
+            transformed *= 1.0 - smoothstep(0.7, 1.0, oE);
+            transformed.xz += (uIntroC - ip) * oE;
+            transformed.y += sin(oE * 3.1416) * (0.4 + 2.0 * oD);
+          }
+        }
+        transformed.y += vH + vRip * 0.75 + aLift * (2.3 + 0.18 * sin(uTime * 1.7 + fract(ip.x * 0.3713 + ip.y * 0.7191) * 6.2831));
+        // Easter egg: fly to this cube's place in the cat on a low arc (and back again when it comes apart)
+        if (catE > 0.0) {
+          vec3 inCat = position + vec3(aCat.x - ip.x, aCat.y, aCat.z - ip.y);
+          transformed = mix(transformed, inCat, catE);
+          transformed.y += sin(catE * 3.1416) * (2.0 + aCat.w * 6.0);
+        }`);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying float vGlint;
+        varying float vTop;
+        varying float vH;
+        varying float vLift;
+        varying float vRip;
+        varying float vFocus;
+        uniform vec3 uLightCol;
+        uniform float uGlow;
+        uniform float uLevel;
+        uniform float uTime;
+        varying vec3 vLocal;
+        varying float vEdge;
+        varying float vHoldF;
+        varying float vTrack;
+        uniform float uGreyOn;
+        varying float vCatE;
+        varying vec3 vCatCol;
+        varying float vOutroGlow;`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = mix(roughnessFactor, 1.0, vHoldF);   // no sheen on the cube carrying lyrics`)
+      .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
+        metalnessFactor = mix(metalnessFactor, 0.0, vHoldF);`)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        // Library view (no song playing): cubes holding a song wear its cover colour, the others turn a little grey
+        if (uGreyOn > 0.001) {
+          float lum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
+          vec3 greyed = mix(diffuseColor.rgb, vec3(lum) * 1.05, 0.65);
+          vec3 brighter = diffuseColor.rgb * 1.75 + vec3(0.02);   // the scene's own tone, lifted
+          diffuseColor.rgb = mix(diffuseColor.rgb, mix(greyed, brighter, vTrack), uGreyOn);
+        }
+        // wave shading (troughs darker); song cubes in the library view keep most of their brightness in the troughs
+        float waveShade = mix(0.5 + 0.65 * smoothstep(-1.5, 1.5, vH), 1.35, vLift);
+        diffuseColor.rgb *= mix(waveShade, max(waveShade, 1.05), vTrack * uGreyOn * 0.7);
+        diffuseColor.rgb *= 1.0 - 0.6 * vHoldF;              // darker ground under the printed faces
+        diffuseColor.rgb = mix(diffuseColor.rgb, vCatCol, vCatE);   // the cat's own colours`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+        float topW = max(vTop, 0.0);
+        totalEmissiveRadiance += uLightCol * vGlint * (0.12 + 0.88 * topW);
+        totalEmissiveRadiance += uLightCol * 0.64 * vLift * (0.10 + 0.22 * topW);
+        // Cubes holding a song from your playlist keep a faint glow on top, so the album reads on the sea
+        totalEmissiveRadiance += diffuse * vTrack * uGreyOn * (0.22 + 0.3 * topW);   // song cubes glow softly in the scene's tone
+        totalEmissiveRadiance += vCatCol * vCatE * 0.16;      // lit enough to read against the night
+        totalEmissiveRadiance += uLightCol * vOutroGlow * 1.3;     // the last cube, holding the whole sea
+        // Ripple crests catch the song's light
+        totalEmissiveRadiance += uLightCol * vRip * (0.18 + 0.5 * topW);
+        // The singing cube: three countdown flashes, then breathes with the music
+        totalEmissiveRadiance += uLightCol * vFocus * (uGlow * 1.5 + uLevel * 0.9 * (1.0 - 0.7 * vHoldF));
+        // Hovered cube: its twelve edges light up (two coordinates at the boundary = an edge)
+        if (vEdge > 0.001) {
+          // A single crisp line along each edge: a very narrow band at the boundary, no fill on the faces
+          vec3 ap = smoothstep(vec3(0.384), vec3(0.396), abs(vLocal));
+          float edge = clamp(ap.x + ap.y + ap.z - 1.0, 0.0, 1.0);
+          totalEmissiveRadiance += uLightCol * vEdge * edge * 1.8;
+        }`);
+  };
+
+  const cube = new THREE.BoxGeometry(SIZE, SIZE, SIZE);
+  const catAttr = new THREE.InstancedBufferAttribute(new Float32Array(COUNT * 4), 4);
+  const catColAttr = new THREE.InstancedBufferAttribute(new Float32Array(COUNT * 3), 3);
+  cube.setAttribute('aCat', catAttr);
+  cube.setAttribute('aCatCol', catColAttr);
+  const sea = new THREE.InstancedMesh(cube, cubeMat, COUNT);
+  sea.frustumCulled = false;
+  const m = new THREE.Matrix4();
+  const zStart = 16;
+  let i = 0;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = (c - (COLS - 1) / 2) * GAP;
+      const z = zStart - r * GAP;
+      m.makeTranslation(x, 0, z);
+      sea.setMatrixAt(i++, m);
+    }
+  }
+  sea.instanceMatrix.needsUpdate = true;
+  scene.add(sea);
+
+  // Open water: a dark sea surface just under the troughs, running out past the last row of cubes to the
+  // horizon (6 km out, where the fog has fully taken it), so the sea meets the sky instead of stopping short.
+  // It also fills the gaps between cubes with deep water rather than background haze.
+  const seaFloor = new THREE.Mesh(
+    new THREE.PlaneGeometry(12000, 12000),
+    new THREE.MeshStandardMaterial({ color: 0x0e1626, roughness: 0.9, metalness: 0 })
+  );
+  seaFloor.rotation.x = -Math.PI / 2;
+  seaFloor.position.set(0, -1.05, 0);
+  seaFloor.renderOrder = -0.5;
+  scene.add(seaFloor);
+
+  // ---- Focused moonlight: a spotlight plus a visible beam, both off until a cube is locked ----
+  // Comes from high on the moon's side, so it falls on the cube's top and rim as the camera sees it
+  const beamDir = new THREE.Vector3(0, 1, -0.5).normalize();
+  const spot = new THREE.SpotLight(0xdfe8ff, 0, 0, 0.085, 0.75, 1);
+  spot.target = new THREE.Object3D();
+  scene.add(spot, spot.target);
+
+  const BEAM_H = 26;
+  const beamGeo = new THREE.CylinderGeometry(0.22, 1.15, BEAM_H, 48, 1, true);
+  beamGeo.translate(0, BEAM_H / 2, 0);
+  const beamMat = new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, fog: false,
+    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+    uniforms: { uTime: U.uTime, uReveal: { value: 0 }, uIntensity: { value: 0 }, uLightCol: U.uLightCol },
+    vertexShader: `
+      varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      void main(){
+        vUv = uv;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vN = normalize(normalMatrix * normal);
+        vV = normalize(-mv.xyz);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform float uTime; uniform float uReveal; uniform float uIntensity;
+      uniform vec3 uLightCol;
+      varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+      void main(){
+        float along = vUv.y;                                   // 1 = moon end, 0 = cube end
+        float edge = pow(abs(dot(normalize(vN), normalize(vV))), 2.2);
+        float reveal = smoothstep(1.0 - uReveal - 0.10, 1.0 - uReveal, along);
+        float fade = smoothstep(1.0, 0.3, along) * (0.4 + 0.6 * smoothstep(0.0, 0.06, along));
+        float drift = 0.82 + 0.18 * sin(along * 46.0 - uTime * 1.3 + vUv.x * 31.4);
+        float a = edge * fade * reveal * drift * uIntensity * 0.30;
+        gl_FragColor = vec4(uLightCol * 0.93 * a, a);
+      }`
+  });
+  const beam = new THREE.Mesh(beamGeo, beamMat);
+  beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), beamDir);
+  beam.visible = false;
+  beam.frustumCulled = false;
+  beam.renderOrder = 2;
+  scene.add(beam);
+  let spotP = 0;
+
+  // ================= Music =================
+  // Every cube owns one piece, derived from its index: key, mode, tempo, motif, timbre and palette.
+  // All of it is synthesised live with Web Audio, so 30,000 cubes need no audio files.
+  function rng(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6D2B79F5) | 0;
+      let q = Math.imul(a ^ (a >>> 15), 1 | a);
+      q = (q + Math.imul(q ^ (q >>> 7), 61 | q)) ^ q;
+      return ((q ^ (q >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  // Each mode carries its own colour of night
+  const MODES = [
+    { name: '伊奥尼亚',   steps: [0, 2, 4, 5, 7, 9, 11], hue: 0.095, sat: 0.62 }, // lantern amber
+    { name: '利底亚',     steps: [0, 2, 4, 6, 7, 9, 11], hue: 0.505, sat: 0.60 }, // glacier cyan
+    { name: '混合利底亚', steps: [0, 2, 4, 5, 7, 9, 10], hue: 0.975, sat: 0.55 }, // coral rose
+    { name: '多利亚',     steps: [0, 2, 3, 5, 7, 9, 10], hue: 0.405, sat: 0.55 }, // aurora jade
+    { name: '爱奥利亚',   steps: [0, 2, 3, 5, 7, 8, 10], hue: 0.725, sat: 0.55 }, // deep violet
+    { name: '弗里几亚',   steps: [0, 1, 3, 5, 7, 8, 10], hue: 0.875, sat: 0.55 }  // magenta dusk
+  ];
+  const NOTE_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
+  const W1 = ['潮', '雾', '萤', '霜', '汐', '鲸', '灯', '沙', '银', '苇', '帆', '礁', '珊瑚', '玻璃', '回声', '月'];
+  const W2 = ['夜曲', '慢板', '摇篮曲', '低语', '回旋曲', '咏叹调', '船歌', '序曲', '余音', '小调'];
+  const PROGS = [[0, 5, 3, 4], [0, 3, 4, 0], [0, 4, 5, 3], [5, 3, 0, 4], [0, 2, 3, 4], [0, 5, 1, 4], [3, 4, 0, 0], [0, 6, 5, 4]];
+
+  function songFor(idx) {
+    const R = rng(Math.imul(idx + 1, 2654435761) ^ 0x5bd1e995);
+    const mode = MODES[Math.floor(R() * MODES.length)];
+    const root = 45 + Math.floor(R() * 12);
+    const bpm = Math.round(68 + R() * 44);
+    const prog = PROGS[Math.floor(R() * PROGS.length)];
+    const motif = Array.from({ length: 16 }, () => (R() < 0.5 ? Math.floor(R() * 7) + (R() < 0.25 ? 7 : 0) : -1));
+    motif[0] = [0, 2, 4][Math.floor(R() * 3)];
+    const song = {
+      idx, mode, root, bpm, prog, motif,
+      fmRatio: [2.0, 3.0, 3.5, 1.5, 4.0][Math.floor(R() * 5)],
+      kick: 0.55 + R() * 0.45,
+      hat: R() < 0.55,
+      padType: R() < 0.5 ? 'sawtooth' : 'triangle',
+      hue: (mode.hue + (R() - 0.5) * 0.06 + 1) % 1,
+      sat: mode.sat,
+      title: '《' + W1[Math.floor(R() * W1.length)] + '之' + W2[Math.floor(R() * W2.length)] + '》'
+    };
+    // Drawn after everything above, so adding lyrics didn't change any cube's existing tune or colours
+    song.lyrics = R() < 0.6 ? makeLyrics(R, idx) : null;
+    return song;
+  }
+
+  // ---- Lyrics: eight short lines per song, written from a small night-sea vocabulary ----
+  const LN = ['月光', '潮声', '海风', '远帆', '星河', '灯火', '浪花', '礁石', '雾', '夜色', '鲸歌', '银沙', '萤火', '回声', '涟漪', '晚风'];
+  const LV_PLACE = ['漂过', '落在', '停在', '沉入', '路过', '睡在'];
+  const LV_OBJ = ['照亮', '拥抱', '轻吻', '唤醒', '穿过', '收起'];
+  const LP = ['你的肩上', '我的掌心', '海的尽头', '方块之间', '无人的岸', '梦的边缘', '夜的深处', '水面之上', '十二度的天空'];
+  const LA = ['慢慢地', '轻轻地', '悄悄地', '一遍又一遍地'];
+  function makeLyrics(R, idx) {
+    const pick = (a) => a[Math.floor(R() * a.length)];
+    const T = [
+      () => pick(LN) + pick(LV_PLACE) + pick(LP),
+      () => pick(LA) + pick(LV_OBJ) + pick(LN),
+      () => '我听见' + pick(LN) + '在' + pick(LP),
+      () => '把' + pick(LN) + '折成纸船',
+      () => '等' + pick(LN) + '回来',
+      () => { const a = pick(LN); let b = pick(LN); if (b === a) b = '你'; return a + '和' + b + '都睡了'; },
+      () => '你说' + pick(LN) + '很远',
+      () => pick(LN) + '从不说再见'
+    ];
+    // Each line shape is used once per song (shuffled), so no song leans on one phrase
+    for (let k = T.length - 1; k > 0; k--) { const j = Math.floor(R() * (k + 1)); [T[k], T[j]] = [T[j], T[k]]; }
+    const lines = T.map((f) => f());
+    // The refrain returns at the end of each verse; one line names the cube's own place on the sea
+    lines[7] = lines[3];
+    lines[Math.floor(R() * 3)] = '第 ' + (Math.floor(idx / COLS) + 1) + ' 行，第 ' + (idx % COLS + 1) + ' 列';
+    return lines;
+  }
+
+  function paletteFor(s) {
+    const c = (h, sa, l) => new THREE.Color().setHSL((h + 1) % 1, Math.min(1, sa), l);
+    return {
+      horizon: c(s.hue, s.sat * 0.75, 0.12),
+      zenith: c(s.hue + 0.04, s.sat * 0.8, 0.03),
+      light: c(s.hue, s.sat * 1.3, 0.76),
+      sea: c(s.hue, s.sat * 0.6, 0.26),
+      hemi: c(s.hue, s.sat * 0.6, 0.22)
+    };
+  }
+  const BASE_PAL = {
+    horizon: U.uHorizon.value.clone(), zenith: U.uZenith.value.clone(), light: U.uLightCol.value.clone(),
+    sea: cubeMat.color.clone(), hemi: hemi.color.clone()
+  };
+  let palTarget = BASE_PAL;
+
+  // ---- Voices ----
+  const midiF = (mm) => 440 * Math.pow(2, (mm - 69) / 12);
+  function envAD(g, t, a, peak, d) {
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(peak, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + d);
+  }
+  function vBell(ctx, out, f, t, v, ratio) {   // FM bell for the melody
+    const car = ctx.createOscillator(); car.type = 'sine'; car.frequency.value = f;
+    const mod = ctx.createOscillator(); mod.type = 'sine'; mod.frequency.value = f * ratio;
+    const mg = ctx.createGain();
+    mg.gain.setValueAtTime(f * 1.4, t); mg.gain.exponentialRampToValueAtTime(f * 0.05, t + 1.2);
+    mod.connect(mg); mg.connect(car.frequency);
+    const g = ctx.createGain(); envAD(g, t, 0.003, 0.085 * v, 1.9);
+    car.connect(g); g.connect(out);
+    car.start(t); mod.start(t); car.stop(t + 2.0); mod.stop(t + 2.0);
+  }
+  function vPad(ctx, out, freqs, t, dur, type) {
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 850; lp.Q.value = 0.4;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.045, t + 1.4);
+    g.gain.setValueAtTime(0.045, t + dur - 0.1);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 1.6);
+    lp.connect(g); g.connect(out);
+    freqs.forEach((f) => [-7, 7].forEach((cents) => {
+      const o = ctx.createOscillator(); o.type = type; o.frequency.value = f; o.detune.value = cents;
+      o.connect(lp); o.start(t); o.stop(t + dur + 1.7);
+    }));
+  }
+  function vBass(ctx, out, f, t, dur) {
+    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380;
+    const g = ctx.createGain(); envAD(g, t, 0.02, 0.2, dur);
+    o.connect(lp); lp.connect(g); g.connect(out); o.start(t); o.stop(t + dur + 0.1);
+  }
+  function vKick(ctx, out, t, v) {
+    const o = ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(115, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.16);
+    const g = ctx.createGain(); envAD(g, t, 0.002, 0.45 * v, 0.36);
+    o.connect(g); g.connect(out); o.start(t); o.stop(t + 0.42);
+  }
+  let noiseBuf = null;
+  function vHat(ctx, out, t) {
+    if (!noiseBuf) {
+      noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.1), ctx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let k = 0; k < d.length; k++) d[k] = Math.random() * 2 - 1;
+    }
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7000;
+    const g = ctx.createGain(); envAD(g, t, 0.001, 0.022, 0.05);
+    src.connect(hp); hp.connect(g); g.connect(out); src.start(t); src.stop(t + 0.08);
+  }
+
+  // ---- Engine ----
+  let actx = null, impulse = null, session = null, sessionFor = -1;
+  const rippleQueue = [];
+  let ripSlot = 0, ripOn = 0, level = 0, shownPhase = '';
+  const songEl = document.getElementById('song');
+
+  let musicPaused = false;         // paused from the moon; separate from the scene's pause button
+  const FADE = 1.0;                // seconds: music fades in when it starts or resumes, and out when it stops or pauses
+  let outGain = null, suspendTimer = 0;
+  // A linear fade on a gain, from wherever it is now
+  function fadeTo(param, value, secs) {
+    const now = actx.currentTime;
+    param.cancelScheduledValues(now);
+    param.setValueAtTime(param.value, now);
+    param.linearRampToValueAtTime(value, now + secs);
+  }
+  function ensureAudio(resume = true) {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      actx = new AC();
+      outGain = actx.createGain();
+      outGain.connect(actx.destination);
+    }
+    if (resume && !musicPaused && actx.state === 'suspended') actx.resume();
+    return actx;
+  }
+  // Sound runs only while the scene is running and the moon hasn't paused it
+  // Pausing fades the sound out over a second and only then holds the clock; resuming fades it back in
+  function syncAudio() {
+    if (!actx) return;
+    const on = playing && !musicPaused;
+    const S = session;
+    clearTimeout(suspendTimer);
+    if (on) {
+      actx.resume();
+      if (audioEl && S && S.kind === 'track' && S.started && !S.failed) audioEl.play().catch(() => {});
+      fadeTo(outGain.gain, 1, FADE);
+    } else {
+      fadeTo(outGain.gain, 0, FADE);
+      suspendTimer = setTimeout(() => {
+        if (playing && !musicPaused) return;
+        actx.suspend();
+        if (audioEl) audioEl.pause();
+      }, FADE * 1000 + 60);
+    }
+  }
+  function makeImpulse(ctx) {
+    const len = Math.floor(ctx.sampleRate * 3.2);
+    const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      for (let k = 0; k < len; k++) d[k] = (Math.random() * 2 - 1) * Math.pow(1 - k / len, 2.8);
+    }
+    return buf;
+  }
+
+  function startSession(idx) {
+    // A cube carrying a song from your playlist plays that song instead of its generated piece
+    if (trackOfCube.has(idx)) { startTrackSession(idx, trackOfCube.get(idx)); return; }
+    const ctx = ensureAudio();
+    if (!ctx) { songEl.textContent = '此浏览器不支持网页音频'; songEl.hidden = false; return; }
+    stopSession();
+    const s = songFor(idx);
+    const master = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    const analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+    const bus = ctx.createGain();
+    const dry = ctx.createGain(); dry.gain.value = 0.8;
+    const wet = ctx.createGain(); wet.gain.value = 0.42;
+    const verb = ctx.createConvolver(); verb.buffer = impulse || (impulse = makeImpulse(ctx));
+    const mgain = ctx.createGain();                  // the music (not the countdown): fades in and out
+    bus.connect(dry); bus.connect(verb); verb.connect(wet);
+    dry.connect(mgain); wet.connect(mgain); mgain.connect(master);
+    master.connect(comp); comp.connect(analyser); analyser.connect(outGain);
+
+    const now = ctx.currentTime + 0.1;
+    master.gain.setValueAtTime(0.9, now);
+    // Countdown: two silent flashes (each with a ring), then the piece enters on the next beat
+    const gap = Math.min(0.95, Math.max(0.62, 60 / s.bpm));
+    const counts = [now, now + gap];
+    const fx = cellX(idx), fz = cellZ(idx);
+    counts.forEach((ct) => rippleQueue.push({ t: ct, s: 0.5, x: fx, z: fz }));
+    const startAt = now + gap * counts.length;
+    session = {
+      s, ctx, bus, master, mgain, analyser, counts, startAt, fx, fz,
+      pal: paletteFor(s),
+      step: 0, nextT: startAt, stepDur: 60 / s.bpm / 2,
+      // A fixed length: intro + 16 two-bar phrases with lyrics, 16 phrases without
+      dur: (s.lyrics ? 17 : 16) * 16 * (60 / s.bpm / 2),
+      buf: new Uint8Array(analyser.fftSize),
+      kind: 'synth'
+    };
+    const S0 = session;
+    S0.elapsed = () => S0.ctx.currentTime - S0.startAt;   // seconds into the song (negative during the countdown)
+    synthEnvelope(S0);
+    session.timer = setInterval(schedule, 40);
+    schedule();
+    // Fetch the serif glyphs this song's words need before they are drawn onto canvas
+    if (s.lyrics && document.fonts && document.fonts.load) {
+      document.fonts.load('300 64px "Noto Serif SC"', s.lyrics.join('') + s.title + '演唱方块№')
+        .then(() => { lyricDirty = true; facesFor = null; }).catch(() => {});
+    }
+  }
+
+  // ---- Imported songs ----
+  let audioEl = null, trackGain = null, trackAnalyser = null, audioOwner = null;
+  function ensureTrackChain(ctx) {
+    if (audioEl) return;
+    audioEl = new Audio();
+    audioEl.preload = 'auto';
+    const src = ctx.createMediaElementSource(audioEl);
+    trackGain = ctx.createGain();
+    trackAnalyser = ctx.createAnalyser();
+    trackAnalyser.fftSize = 1024;
+    trackAnalyser.smoothingTimeConstant = 0.15;          // keep attacks sharp for the live fallback
+    src.connect(trackGain); trackGain.connect(trackAnalyser); trackAnalyser.connect(outGain);
+    const mine = () => { const S = session; return S && S.kind === 'track' && audioOwner === S ? S : null; };
+    audioEl.addEventListener('ended', () => { if (mine()) goTrack(1); });
+    audioEl.addEventListener('error', () => { const S = mine(); if (S) trackFailed(S); });
+    audioEl.addEventListener('loadedmetadata', () => {
+      const S = mine();
+      if (!S || !isFinite(audioEl.duration) || audioEl.duration <= 0) return;
+      S.dur = audioEl.duration;
+      S.t.duration = audioEl.duration;
+      if (S.plain && !S.lrc) spreadLyrics(S);
+    });
+  }
+  function hueOf(text) {
+    let h = 7;
+    for (const ch of String(text)) h = (h * 31 + ch.charCodeAt(0)) % 997;
+    return h / 997;
+  }
+  // The dominant vivid colour of a cover, used to tint the scene for that song
+  // ---- Cover recognition ----
+  // Reads the cover's colours: pixels are grouped into 24 hue bands (plus a band for greys); the band with the
+  // most visual weight is the dominant colour, and the most vivid band that is clearly a different hue is the
+  // accent. Weight favours saturated, mid-light pixels so a thin bright logo doesn't outvote a big field of colour,
+  // while a large dark or pale area still counts.
+  function readCover(img) {
+    try {
+      const N = 56;
+      const cv = document.createElement('canvas'); cv.width = cv.height = N;
+      const g = cv.getContext('2d'); g.drawImage(img, 0, 0, N, N);
+      const px = g.getImageData(0, 0, N, N).data;
+      const BANDS = 24, bands = Array.from({ length: BANDS + 1 }, () => ({ w: 0, vivid: 0, r: 0, g: 0, b: 0, n: 0 }));
+      const tmpC = new THREE.Color(), hsl = {};
+      let lightSum = 0, count = 0;
+      for (let k = 0; k < px.length; k += 4) {
+        if (px[k + 3] < 128) continue;
+        tmpC.setRGB(px[k] / 255, px[k + 1] / 255, px[k + 2] / 255).getHSL(hsl);
+        lightSum += hsl.l; count++;
+        const grey = hsl.s < 0.16 || hsl.l < 0.08 || hsl.l > 0.94;
+        const band = bands[grey ? BANDS : Math.floor(hsl.h * BANDS) % BANDS];
+        const w = grey ? 0.35 : 0.4 + hsl.s * (1 - Math.abs(hsl.l - 0.5) * 1.3);
+        band.w += w; band.n++;
+        band.vivid += grey ? 0 : hsl.s * (1 - Math.abs(hsl.l - 0.55));
+        band.r += px[k] * w; band.g += px[k + 1] * w; band.b += px[k + 2] * w;
+      }
+      if (!count) return null;
+      const colourOf = (bd) => new THREE.Color(bd.r / bd.w / 255, bd.g / bd.w / 255, bd.b / bd.w / 255);
+      const ranked = bands.map((bd, i) => ({ bd, i })).filter((x) => x.bd.n > 0).sort((x, y) => y.bd.w - x.bd.w);
+      const dom = ranked[0];
+      const dominant = colourOf(dom.bd);
+      // Accent: the most vivid band at least ~45° away in hue (or, for a one-colour cover, its own brightest tone)
+      const hueGap = (i, j) => { const d = Math.abs(i - j) % BANDS; return Math.min(d, BANDS - d); };
+      const acc = ranked.filter((x) => x.i < BANDS && (dom.i === BANDS || hueGap(x.i, dom.i) >= 3) && x.bd.n > count * 0.02)
+        .sort((x, y) => y.bd.vivid - x.bd.vivid)[0];
+      const accent = acc ? colourOf(acc.bd) : dominant.clone();
+      const swatches = ranked.slice(0, 5).map((x) => colourOf(x.bd));
+      return { dominant, accent, swatches, light: lightSum / count, mono: dom.i === BANDS && !acc };
+    } catch (err) { return null; }
+  }
+  // Scene palette from a recognised cover: the night takes the dominant colour, the moonlight takes the accent
+  function paletteFromCover(cv) {
+    const d = {}, a = {};
+    cv.dominant.getHSL(d); cv.accent.getHSL(a);
+    const c = (hh, sa, l) => new THREE.Color().setHSL((hh + 1) % 1, Math.max(0, Math.min(1, sa)), l);
+    if (cv.mono) { d.h = 0.62; a.h = 0.62; }          // a black-and-white cover: a neutral, slightly cool night
+    const sat = cv.mono ? 0.08 : Math.max(0.2, Math.min(0.8, d.s));
+    const lift = (cv.light - 0.4) * 0.08;                // brighter covers give a slightly lighter night
+    return {
+      horizon: c(d.h, sat * 0.8, Math.max(0.06, 0.12 + lift)),
+      zenith: c(d.h + 0.03, sat * 0.85, 0.03),
+      sea: c(d.h, sat * 0.65, Math.max(0.16, 0.25 + lift)),
+      hemi: c(d.h, sat * 0.6, 0.21),
+      light: cv.mono ? c(a.h, 0.15, 0.82) : c(a.h, Math.max(0.4, Math.min(0.9, a.s * 1.2)), 0.74)
+    };
+  }
+  function loadGlyphs(s) {
+    if (!document.fonts || !document.fonts.load) return;
+    document.fonts.load('300 64px "Noto Serif SC"', (s.lyrics || []).join('') + s.title + (s.artist || '') + (s.album || '') + '演唱方块№无法播放')
+      .then(() => { lyricDirty = true; facesFor = null; }).catch(() => {});
+  }
+  // Untimed lyrics: lay the lines evenly across the song (after a short intro, ending a little before the end)
+  function spreadLyrics(S) {
+    const n = S.plain.length, d = S.dur || S.t.duration || 240;
+    const a = Math.min(12, d * 0.08), b = d * 0.95;
+    S.lrc = S.plain.map((text, i) => ({ t: a + (b - a) * i / n, text }));
+    S.s.lyrics = S.plain.slice();
+    loadGlyphs(S.s);
+  }
+  function trackFailed(S) {
+    if (S.failed) return;
+    S.failed = true;
+    S.s.failText = '无法播放 · 浏览器可能不支持这个格式';
+    facesFor = null;
+    shownPhase = '';
+    setTimeout(() => { if (session === S) goTrack(1); }, 2600);
+  }
+
+  // ---- Beat tracking for imported songs ----
+  // The whole file is decoded once (at a low sample rate) while the countdown runs. From it: an onset curve
+  // (rises in bass energy, plus a share of rises in the upper band), the tempo (autocorrelation of that curve,
+  // with a gentle preference for about 120 BPM), and the beats themselves (dynamic programming that favours
+  // strong onsets spaced one beat apart). Ripples are then sent on those beats by playback position, so
+  // they stay on time through seeking and pausing, and do not depend on the screen's frame rate.
+  const beatCache = new WeakMap();                    // song file → Promise of its beats
+  function beatsFor(t) {
+    if (!t || !t.blob) return Promise.resolve(null);
+    if (!beatCache.has(t.blob)) beatCache.set(t.blob, analyzeBeats(t.blob).catch(() => null));
+    return beatCache.get(t.blob);
+  }
+  async function analyzeBeats(blob) {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OAC) return null;
+    const SR = 22050;
+    const data = await blob.arrayBuffer();
+    const ctx = new OAC(1, SR, SR);
+    const audio = await new Promise((resolve, reject) => {
+      const pr = ctx.decodeAudioData(data, resolve, reject);
+      if (pr && pr.catch) pr.catch(reject);
+    });
+    const ch0 = audio.getChannelData(0);
+    const ch1 = audio.numberOfChannels > 1 ? audio.getChannelData(1) : null;
+    return await beatsFromSamples(ch0, ch1, audio.sampleRate, () => new Promise((r) => setTimeout(r, 0)));
+  }
+
+  // Pure analysis (also usable outside the browser): samples → { times, str, bpm }
+  async function beatsFromSamples(ch0, ch1, sr, breathe) {
+    const HOP = Math.max(128, Math.round(512 * sr / 22050));
+    const fps = sr / HOP;
+    const frames = Math.floor(ch0.length / HOP);
+    if (frames < fps * 4) return null;                // under four seconds: nothing to track
+    // 1) band energies per frame: bass (two one-pole low-passes at 150 Hz) and upper (above ~1.5 kHz)
+    const lowE = new Float32Array(frames), hiE = new Float32Array(frames), allE = new Float32Array(frames);
+    const aL = 1 - Math.exp(-2 * Math.PI * 150 / sr), aH = 1 - Math.exp(-2 * Math.PI * 1500 / sr);
+    let l1 = 0, l2 = 0, h1 = 0;
+    for (let f = 0; f < frames; f++) {
+      let el = 0, eh = 0, ea = 0;
+      const base = f * HOP;
+      for (let i = 0; i < HOP; i++) {
+        const x = ch1 ? (ch0[base + i] + ch1[base + i]) * 0.5 : ch0[base + i];
+        l1 += aL * (x - l1); l2 += aL * (l1 - l2);
+        h1 += aH * (x - h1);
+        const hx = x - h1;
+        el += l2 * l2; eh += hx * hx; ea += x * x;
+      }
+      lowE[f] = el / HOP; hiE[f] = eh / HOP; allE[f] = ea / HOP;
+      if (breathe && f % 3000 === 2999) await breathe();
+    }
+    const mean = (a) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; return s / a.length; };
+    const epsL = mean(lowE) * 0.02 + 1e-10, epsH = mean(hiE) * 0.02 + 1e-10;
+    // 2) onset curve: positive steps in log energy (floored, so near-silence does not flicker)
+    const odf = new Float32Array(frames);
+    let pl = Math.log(lowE[0] + epsL), ph = Math.log(hiE[0] + epsH);
+    for (let f = 1; f < frames; f++) {
+      const cl = Math.log(lowE[f] + epsL), chh = Math.log(hiE[f] + epsH);
+      odf[f] = 0.7 * Math.max(0, cl - pl) + 0.3 * Math.max(0, chh - ph);
+      pl = cl; ph = chh;
+    }
+    // remove the slow trend (local mean over ±0.4 s) and scale to unit spread
+    const W = Math.round(fps * 0.4), pre = new Float64Array(frames + 1);
+    for (let f = 0; f < frames; f++) pre[f + 1] = pre[f] + odf[f];
+    const on = new Float32Array(frames);
+    for (let f = 0; f < frames; f++) {
+      const a = Math.max(0, f - W), b = Math.min(frames, f + W + 1);
+      on[f] = Math.max(0, odf[f] - (pre[b] - pre[a]) / (b - a));
+    }
+    let sd = 0; const mo = mean(on);
+    for (let f = 0; f < frames; f++) sd += (on[f] - mo) ** 2;
+    sd = Math.sqrt(sd / frames) || 1;
+    for (let f = 0; f < frames; f++) on[f] /= sd;
+    if (breathe) await breathe();
+    // 3) tempo: autocorrelation over 60–200 BPM, weighted toward ~120 BPM (one-octave spread)
+    const minLag = Math.max(2, Math.floor(fps * 60 / 200)), maxLag = Math.ceil(fps * 60 / 60);
+    const ac = new Float32Array(maxLag + 2);
+    for (let L = minLag - 1; L <= maxLag + 1; L++) {
+      let s = 0;
+      for (let f = L; f < frames; f++) s += on[f] * on[f - L];
+      ac[L] = s / (frames - L);
+    }
+    let bestL = minLag, bestV = -Infinity;
+    for (let L = minLag; L <= maxLag; L++) {
+      const bpm = 60 * fps / L;
+      const w = Math.exp(-0.5 * (Math.log2(bpm / 120) / 1.0) ** 2);
+      if (ac[L] * w > bestV) { bestV = ac[L] * w; bestL = L; }
+    }
+    const y0 = ac[bestL - 1], y1 = ac[bestL], y2 = ac[bestL + 1];
+    const den = y0 - 2 * y1 + y2;
+    const period = bestL + (Math.abs(den) > 1e-9 ? Math.max(-0.5, Math.min(0.5, 0.5 * (y0 - y2) / den)) : 0);
+    // 4) beats: cumulative score = onset + best earlier beat 0.5–2 periods back, penalising off-tempo gaps
+    const TIGHT = 100;
+    const local = new Float32Array(frames);           // onset curve smoothed over ±period/32
+    const gw = Math.max(1, Math.round(period / 32));
+    for (let f = 0; f < frames; f++) {
+      let s = 0, ws = 0;
+      for (let k = -2 * gw; k <= 2 * gw; k++) {
+        const j = f + k;
+        if (j < 0 || j >= frames) continue;
+        const w = Math.exp(-0.5 * (k / gw) ** 2);
+        s += on[j] * w; ws += w;
+      }
+      local[f] = s / ws;
+    }
+    const cum = new Float32Array(frames), back = new Int32Array(frames).fill(-1);
+    const lo = Math.round(period / 2), hi = Math.round(period * 2);
+    for (let f = 0; f < frames; f++) {
+      let best = 0, arg = -1;
+      for (let g = lo; g <= hi; g++) {
+        const j = f - g;
+        if (j < 0) break;
+        const v = cum[j] - TIGHT * Math.log(g / period) ** 2;
+        if (arg < 0 || v > best) { best = v; arg = j; }
+      }
+      cum[f] = local[f] + (arg >= 0 ? best : 0);
+      back[f] = arg;
+    }
+    let last = frames - 1, lastV = -Infinity;
+    for (let f = Math.max(0, frames - Math.round(period * 2)); f < frames; f++) if (cum[f] > lastV) { lastV = cum[f]; last = f; }
+    const beatsF = [];
+    for (let f = last; f >= 0; f = back[f]) beatsF.push(f);
+    beatsF.reverse();
+    // 5) strengths: the onset near each beat against the song's loud onsets, and how loud the music is there
+    const sortedOn = Array.from(on).filter((v) => v > 0).sort((a, b) => a - b);
+    const p90 = sortedOn.length ? sortedOn[Math.floor(sortedOn.length * 0.9)] : 1;
+    const sortedE = Array.from(allE).sort((a, b) => a - b);
+    const medE = sortedE[Math.floor(sortedE.length / 2)] || 1e-9;
+    let times = [], str = [];
+    beatsF.forEach((f) => {
+      let pk = 0;
+      for (let k = -2; k <= 2; k++) { const j = f + k; if (j >= 0 && j < frames && on[j] > pk) pk = on[j]; }
+      const loud = Math.min(1, Math.sqrt(allE[f] / (medE * 1.2)));
+      if (allE[f] < medE * 0.02) return;                    // silence before or after the music
+      if (pk < p90 * 0.15) return;                          // the beat goes on, but nothing actually sounds there
+      const s = Math.min(1, 0.25 + 0.75 * Math.min(1, pk / (p90 || 1))) * Math.max(0.3, loud);
+      if (s >= 0.18) { times.push(f / fps); str.push(s); }
+    });
+    // 6) fast songs: ring on every other beat (the stronger half), so rings stay legible
+    const bpm = 60 * fps / period;
+    if (bpm > 150 && times.length > 4) {
+      let a = 0, b = 0;
+      str.forEach((v, i) => { if (i % 2) b += v; else a += v; });
+      const keep = a >= b ? 0 : 1;
+      times = times.filter((_, i) => i % 2 === keep);
+      str = str.filter((_, i) => i % 2 === keep);
+    }
+    return { times: Float32Array.from(times), str: Float32Array.from(str), bpm };
+  }
+  const firstAfter = (arr, x) => { let a = 0, b = arr.length; while (a < b) { const m = (a + b) >> 1; if (arr[m] <= x) a = m + 1; else b = m; } return a; };
+
+  function startTrackSession(idx, k) {
+    const ctx = ensureAudio();
+    if (!ctx || !imported) return;
+    stopSession();
+    ensureTrackChain(ctx);
+    const t = imported.tracks[k];
+    const s = {
+      isTrack: true, idx, k, title: t.title || '未命名', artist: t.artist || '', album: t.album || '',
+      hue: hueOf((t.title || '') + (t.artist || '')), sat: 0.55, lyrics: null, root: 57
+    };
+    // Countdown: two silent flashes and their rings, as for any cube
+    const master = ctx.createGain(); master.gain.value = 0.9;
+    const bus = ctx.createGain(); bus.connect(master); master.connect(outGain);
+    const now = ctx.currentTime + 0.1, gap = 0.75;
+    const counts = [now, now + gap];
+    const fx = cellX(idx), fz = cellZ(idx);
+    counts.forEach((ct) => rippleQueue.push({ t: ct, s: 0.5, x: fx, z: fz }));
+    const S = {
+      kind: 'track', s, t, ctx, bus, master, analyser: trackAnalyser, counts, startAt: now + gap * counts.length, fx, fz,
+      pal: paletteFor(s), dur: t.duration || 240, started: false, failed: false,
+      buf: new Uint8Array(trackAnalyser.fftSize),
+      lastBeat: -1, lrc: null, li: 0,
+      beats: null, bi: 0, beatPos: 0,                     // tracked beats (once the file is analysed)
+      prevLog: null, fMean: 0, fVar: 0.04                 // live fallback until then
+    };
+    S.elapsed = () => (S.started ? audioEl.currentTime : S.ctx.currentTime - S.startAt);
+    beatsFor(t).then((b) => {
+      if (session !== S || !b || !b.times.length) return;
+      S.beats = b;
+      S.beatPos = S.started ? audioEl.currentTime : 0;
+      S.bi = firstAfter(b.times, S.beatPos);
+    });
+    session = S;
+    audioOwner = S;
+    trackGain.gain.cancelScheduledValues(ctx.currentTime);
+    trackGain.gain.setValueAtTime(0, ctx.currentTime);     // silent until the song starts, then it fades in
+    audioEl.src = t.url;
+    audioEl.load();
+    // Lyrics: timed lines (from an .lrc file or timed embedded lyrics) or plain text spread over the song
+    if (t.lrc && t.lrc.length) { S.lrc = t.lrc; s.lyrics = t.lrc.map((l) => l.text); }
+    else if (t.plain && t.plain.length) { S.plain = t.plain; if (t.duration) spreadLyrics(S); }
+    // The cover goes on the cube's left face, and its colour tints the scene
+    if (t.coverUrl) {
+      const img = new Image();
+      img.onload = () => {
+        if (session !== S) return;
+        s.coverImg = img;
+        const cv = readCover(img);
+        if (cv) {
+          const hsl = {}; cv.dominant.getHSL(hsl);
+          s.hue = hsl.h; s.sat = Math.max(0.2, Math.min(0.8, hsl.s));
+          s.swatches = cv.swatches;
+          S.pal = paletteFromCover(cv);
+        }
+        facesFor = null;
+      };
+      img.src = t.coverUrl;
+    }
+    loadGlyphs(s);
+  }
+
+  // A generated piece rises over its first second and falls away over its last one
+  function synthEnvelope(S) {
+    const g = S.mgain.gain, now = S.ctx.currentTime, a = S.startAt, end = S.startAt + S.dur;
+    g.cancelScheduledValues(now);
+    if (now < a) { g.setValueAtTime(0, now); g.setValueAtTime(0, a); g.linearRampToValueAtTime(1, a + FADE); }
+    else g.setValueAtTime(1, now);                   // after a seek, carry straight on
+    g.setValueAtTime(1, Math.max(now, end - FADE));
+    g.linearRampToValueAtTime(0, end);
+  }
+
+  function stopSession() {
+    const S = session;
+    if (!S) return;
+    session = null;
+    clearInterval(S.timer);
+    if (S.kind === 'track' && trackGain) {
+      const t0 = S.ctx.currentTime;
+      trackGain.gain.cancelScheduledValues(t0);
+      trackGain.gain.setValueAtTime(trackGain.gain.value, t0);
+      trackGain.gain.linearRampToValueAtTime(0, t0 + FADE);
+      setTimeout(() => { if (audioOwner === S) audioEl.pause(); }, FADE * 1000 + 50);
+    }
+    const now = S.ctx.currentTime;
+    S.master.gain.cancelScheduledValues(now);
+    S.master.gain.setValueAtTime(S.master.gain.value, now);
+    S.master.gain.linearRampToValueAtTime(0, now + FADE);
+    setTimeout(() => { try { S.master.disconnect(); } catch (err) { /* already gone */ } }, FADE * 1000 + 400);
+    rippleQueue.length = 0;
+  }
+
+  function schedule() {
+    const S = session;
+    if (!S) return;
+    const now = S.ctx.currentTime;
+    // After a throttled background tab, skip ahead rather than fire a burst of late notes
+    while (S.nextT < now - 0.05) { S.step++; S.nextT += S.stepDur; }
+    while (S.nextT < now + 0.3 && S.step * S.stepDur < S.dur) { playStep(S, S.step, S.nextT); S.step++; S.nextT += S.stepDur; }
+  }
+
+  // Jump to a time in the current song (only once the countdown is over)
+  function seekTo(sec) {
+    const S = session;
+    if (!S || S.ctx.currentTime < S.startAt) return;
+    if (S.kind === 'track') {
+      if (S.started) audioEl.currentTime = Math.max(0, Math.min(S.dur - 0.5, sec));
+      rippleQueue.length = 0;
+      return;
+    }
+    sec = Math.max(0, Math.min(S.dur - 0.25, sec));
+    const now = S.ctx.currentTime;
+    S.startAt = now - sec;
+    S.step = Math.ceil(sec / S.stepDur);
+    S.nextT = S.startAt + S.step * S.stepDur;
+    synthEnvelope(S);
+    rippleQueue.length = 0;
+  }
+
+  function playStep(S, step, time) {
+    const s = S.s, ctx = S.ctx;
+    const st = step % 64;                    // 8 bars of eighth notes
+    const bar = Math.floor(st / 8), inBar = st % 8;
+    const chord = s.prog[Math.floor(bar / 2)];
+    const deg = (d) => s.root + s.mode.steps[((d % 7) + 7) % 7] + 12 * Math.floor(d / 7);
+
+    if (st % 16 === 0) vPad(ctx, S.bus, [0, 2, 4].map((o) => midiF(deg(chord + o) + 12)), time, S.stepDur * 16, s.padType);
+    if (inBar === 0 || (inBar === 4 && bar % 2 === 1)) vBass(ctx, S.bus, midiF(deg(chord)), time, S.stepDur * 3.5);
+    if (inBar % 2 === 0) {
+      const down = inBar === 0;
+      vKick(ctx, S.mgain, time, (down ? 1 : 0.5) * s.kick);
+      rippleQueue.push({ t: time, s: down ? 1.0 : 0.5, x: S.fx, z: S.fz });
+    } else if (s.hat) {
+      vHat(ctx, S.mgain, time);
+    }
+    const md = s.motif[st % 16];
+    if (md >= 0 && step >= 16) {             // melody joins after the first phrase
+      const phrase = Math.floor(step / 16);
+      vBell(ctx, S.bus, midiF(deg(md + chord + (phrase % 4 === 3 ? 2 : 0)) + 24), time, (st % 4 === 0) ? 1 : 0.65, s.fmRatio);
+    }
+  }
+
+  function updateMusic(dt) {
+    if (locked >= 0 && sessionFor !== locked && focusP >= 0.98) {
+      sessionFor = locked;
+      startSession(locked);
+    }
+    const S = session;
+    const at = actx ? actx.currentTime : 0;
+    U.uAudioT.value = at;
+
+    while (rippleQueue.length && rippleQueue[0].t <= at) {
+      const ev = rippleQueue.shift();
+      U.uRip.value[ripSlot].set(ev.t, ev.s, ev.x, ev.z);
+      ripSlot = (ripSlot + 1) % 12;
+    }
+    ripOn += ((S && !musicPaused ? 1 : 0) - ripOn) * (1 - Math.exp(-dt * 1.5));
+    U.uRipOn.value = ripOn;
+
+    let glow = 0, phase = '';
+    if (S && S.kind === 'track') {
+      if (!S.started && !S.failed && at >= S.startAt && playing && !musicPaused) {
+        S.started = true;
+        fadeTo(trackGain.gain, 1, FADE);
+        const pr = audioEl.play();
+        if (pr) pr.catch(() => trackFailed(S));
+      }
+      // Rings on the beat
+      if (S.started && !musicPaused && playing && !S.failed) {
+        if (S.beats) {
+          // Tracked beats, by playback position: each ring is dated to the moment its beat sounded
+          const pos = audioEl.currentTime, T = S.beats.times;
+          if (pos < S.beatPos - 0.05 || pos - S.beatPos > 0.8) {
+            S.bi = firstAfter(T, pos);                    // a seek: pick up from the next beat, no burst of rings
+          } else {
+            while (S.bi < T.length && T[S.bi] <= pos) {
+              rippleQueue.push({ t: at - (pos - T[S.bi]), s: S.beats.str[S.bi], x: S.fx, z: S.fz });
+              S.bi++;
+            }
+          }
+          S.beatPos = pos;
+        } else {
+          // Until the analysis is ready (or if this browser cannot decode the file): a rise in bass power
+          // well above its recent spread. Power is linear (converted from dB) and the averages use real time.
+          if (!S.fdb) S.fdb = new Float32Array(S.analyser.frequencyBinCount);
+          S.analyser.getFloatFrequencyData(S.fdb);
+          const binHz = S.ctx.sampleRate / S.analyser.fftSize;
+          let pw = 0;
+          for (let b = 1; b * binHz <= 160; b++) pw += Math.pow(10, S.fdb[b] / 10);
+          const lg = Math.log(pw + 1e-9);
+          const flux = S.prevLog === null ? 0 : Math.max(0, lg - S.prevLog);
+          S.prevLog = lg;
+          const kf = 1 - Math.exp(-dt / 1.5);
+          const dev = flux - S.fMean;
+          S.fMean += kf * dev;
+          S.fVar += kf * (dev * dev - S.fVar);
+          const sd = Math.sqrt(S.fVar);
+          if (flux > S.fMean + 2.2 * sd + 0.25 && at - S.lastBeat > 0.33) {
+            S.lastBeat = at;
+            rippleQueue.push({ t: at, s: Math.max(0.4, Math.min(1, (flux - S.fMean) / (4 * sd + 1e-6))), x: S.fx, z: S.fz });
+          }
+        }
+      }
+    }
+    if (S) {
+      S.counts.forEach((ct, k) => { if (at >= ct) glow += Math.exp(-(at - ct) * 4.5) * (k === S.counts.length - 1 ? 1.25 : 1); });
+      if (at < S.startAt) {
+        const n = S.counts.filter((ct) => at >= ct).length;
+        phase = n ? String(S.counts.length + 1 - n) : '…';
+      } else phase = 'play';
+      if (musicPaused) phase = 'paused';
+      let target = 0;
+      // A song with lyrics holds the cube steady (no breathing glow) so the words on it stay readable
+      if (at >= S.startAt && !musicPaused && !S.s.lyrics) {
+        S.analyser.getByteTimeDomainData(S.buf);
+        let sum = 0;
+        for (let k = 0; k < S.buf.length; k++) { const v = (S.buf[k] - 128) / 128; sum += v * v; }
+        target = Math.min(1, Math.sqrt(sum / S.buf.length) * 4.5);
+      }
+      level += (target - level) * 0.25;
+      // During a countdown the scene keeps the previous song's tone, then moves to the new one
+      if (at >= S.startAt - 0.3) palTarget = S.pal;
+    } else {
+      level *= 0.9;
+      if (locked < 0) palTarget = BASE_PAL;
+    }
+    U.uGlow.value = glow;
+    U.uLevel.value = level;
+
+    if (phase !== shownPhase) {
+      shownPhase = phase;
+      if (!phase) songEl.hidden = true;
+      else {
+        songEl.hidden = false;
+        songEl.textContent = phase === 'play'
+          ? (S.s.isTrack
+            ? '♪ ' + S.s.title + (S.s.artist ? ' · ' + S.s.artist : '') + (S.s.failText ? ' · ' + S.s.failText : '')
+            : '♪ ' + S.s.title + ' · ' + NOTE_NAMES[S.s.root % 12] + ' ' + S.s.mode.name + ' · ' + S.s.bpm + ' BPM' + (S.s.lyrics ? ' · 有歌词' : ' · 纯音乐'))
+          : phase === 'paused'
+            ? '❚❚ ' + S.s.title + ' · 已暂停，点击月亮继续'
+            : '倒计时 ' + phase;
+      }
+    }
+
+    // Ease the whole scene toward the song's palette (or back to moonlight)
+    const k = 1 - Math.exp(-dt * 0.9);
+    U.uHorizon.value.lerp(palTarget.horizon, k);
+    U.uZenith.value.lerp(palTarget.zenith, k);
+    U.uLightCol.value.lerp(palTarget.light, k);
+    cubeMat.color.lerp(palTarget.sea, k);
+    seaFloor.material.color.copy(cubeMat.color).multiplyScalar(0.4);   // the deep water under the cubes
+    hemi.color.lerp(palTarget.hemi, k);
+    // Distant sea fades into the same mist the sky shows at the horizon (horizon colour × 1.3)
+    scene.fog.color.copy(U.uHorizon.value).multiplyScalar(1.3);
+    renderer.setClearColor(scene.fog.color, 1);
+    moonLight.color.copy(U.uLightCol.value).multiplyScalar(0.92);
+    spot.color.copy(U.uLightCol.value).multiplyScalar(1.08);
+  }
+
+  // ---- Lift: one value per cube, eased toward 1 while pointed at, back to 0 after ----
+  const LIFT_H = 2.3;
+  const lift = new Float32Array(COUNT);
+  const liftAttr = new THREE.InstancedBufferAttribute(lift, 1);
+  liftAttr.setUsage(THREE.DynamicDrawUsage);
+  cube.setAttribute('aLift', liftAttr);
+  // Spin: raw angle advances slowly while a cube is up; the value sent to the shader blends toward the
+  // nearest quarter turn as the cube sinks, so it lands square with its neighbours (a cube looks the same
+  // every 90°)
+  const SPIN_SPEED = 0.14;                       // rad/s at full lift
+  const spinRaw = new Float32Array(COUNT);
+  const spin = new Float32Array(COUNT);
+  const spinAttr = new THREE.InstancedBufferAttribute(spin, 1);
+  spinAttr.setUsage(THREE.DynamicDrawUsage);
+  cube.setAttribute('aSpin', spinAttr);
+
+  // ---- Imported playlist: songs laid out in a block in front of the camera, in playlist order ----
+  // (row by row, nearest row first, left to right; next / previous follow this order)
+  const MAX_TRACKS = 3000;
+  let imported = null;                          // { name, tracks: [{ title, artist, album, url, coverUrl, lrc, plain, duration }] }
+  const trackOfCube = new Map();                // cube index → song index
+  let cubeOfTrack = [];                         // song index → cube index
+  const trackMark = new Float32Array(COUNT);
+  const trackAttr = new THREE.InstancedBufferAttribute(trackMark, 1);
+  cube.setAttribute('aTrack', trackAttr);
+  function placeTracks(data) {
+    trackOfCube.clear();
+    trackMark.fill(0);
+    cubeOfTrack = [];
+    imported = data && Array.isArray(data.tracks) && data.tracks.length ? data : null;
+    if (imported) {
+      const n = Math.min(imported.tracks.length, MAX_TRACKS);
+      const cols = Math.min(COLS - 4, Math.max(8, Math.ceil(Math.sqrt(n * 2.4))));
+      const c0 = Math.floor((COLS - cols) / 2), r0 = 10;   // starts about 16 units in front of the camera
+      for (let k = 0; k < n; k++) {
+        const r = r0 + Math.floor(k / cols), c = c0 + (k % cols);
+        if (r >= ROWS) break;
+        const idx = r * COLS + c;
+        trackOfCube.set(idx, k);
+        cubeOfTrack[k] = idx;
+        trackMark[idx] = 1;
+      }
+    }
+    trackAttr.needsUpdate = true;
+  }
+
+  const QUARTER = Math.PI / 2;
+  const active = new Set();
+  let hovered = -1;
+
+  // Same swell as the shader, so the pointer lands on the cube you see
+  const WJS = WAVES.map(([deg, L, A]) => {
+    const a = deg * Math.PI / 180, k = 2 * Math.PI / L;
+    return { dx: Math.sin(a), dz: Math.cos(a), k, A, w: Math.sqrt(9.8 * k) * SWELL_SPEED };
+  });
+  function hAt(x, z, tt) {
+    let h = 0;
+    for (const w of WJS) h += w.A * Math.sin(w.k * (w.dx * x + w.dz * z) - w.w * tt);
+    return h;
+  }
+  const cellX = (idx) => (idx % COLS - (COLS - 1) / 2) * GAP;
+  const cellZ = (idx) => zStart - Math.floor(idx / COLS) * GAP;
+
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  const tmpC = new THREE.Vector3();
+  let px = 0, py = 0, pointerIn = false, touchTimer = 0;
+
+  function pick(tt) {
+    if (U.uIntro.value < 0.97 || U.uCat.value > 0.001 || outro.on) return -1;
+    if (!pointerIn) return -1;
+    ndc.set((px / innerWidth) * 2 - 1, -(py / innerHeight) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const o = raycaster.ray.origin, d = raycaster.ray.direction;
+
+    // Keep hold of a cube that is already in the air
+    if (hovered >= 0 && lift[hovered] > 0.25) {
+      const cx0 = cellX(hovered), cz0 = cellZ(hovered);
+      tmpC.set(cx0, hAt(cx0, cz0, tt) + lift[hovered] * LIFT_H, cz0).sub(o);
+      const along = tmpC.dot(d);
+      if (along > 0 && tmpC.lengthSq() - along * along < 0.6 * 0.6) return hovered;
+    }
+    if (d.y > -0.002) return -1;
+
+    const top = SIZE * 0.5, step = 0.3;
+    let s = 0.5, hit = -1;
+    for (; s < 260; s += step) {
+      const y = o.y + d.y * s;
+      if (y < -3) return -1;
+      if (y < hAt(o.x + d.x * s, o.z + d.z * s, tt) + top) { hit = s; break; }
+    }
+    if (hit < 0) return -1;
+    let a = hit - step, b = hit;
+    for (let k = 0; k < 7; k++) {
+      const m = (a + b) / 2;
+      if (o.y + d.y * m < hAt(o.x + d.x * m, o.z + d.z * m, tt) + top) b = m; else a = m;
+    }
+    const x = o.x + d.x * b, z = o.z + d.z * b;
+    // Hysteresis: stay on the current cube until the pointer clearly leaves its cell,
+    // so the swell drifting under a still pointer doesn't hop to a neighbour
+    if (hovered >= 0) {
+      const margin = GAP * 0.5 + 0.32;
+      if (Math.abs(x - cellX(hovered)) < margin && Math.abs(z - cellZ(hovered)) < margin) return hovered;
+    }
+    const c = Math.round(x / GAP + (COLS - 1) / 2);
+    const r = Math.round((zStart - z) / GAP);
+    if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return -1;
+    return r * COLS + c;
+  }
+
+  // ---- Lock + close-up ----
+  let locked = -1;          // cube held in the air
+  let focusCell = -1;       // cube the camera is framing (kept while zooming back out)
+  let focusP = 0;           // 0 = wide view, 1 = close-up
+  let pendingTap = null;    // a click/tap handled on the next frame, after picking
+  const focusC = new THREE.Vector3();
+  const lockBtn = document.getElementById('unlock');
+  const coord = document.getElementById('coord');
+
+  // ---- Sea view: pull back to the wide shot while the cube keeps singing ----
+  const seaBtn = document.getElementById('seaview');
+  const SEA_AFTER = 10;            // seconds of close-up listening before the camera pulls back on its own
+  let seaView = false;             // camera wants the wide shot even though a cube is locked
+  let seaP = 0;                    // eased 0 (close-up) → 1 (wide)
+  let closeTimer = 0;              // seconds spent in the close-up with music playing
+
+  function setSeaView(v) {
+    seaView = v;
+    closeTimer = 0;
+    seaBtn.textContent = v ? '返回特写' : '观海模式';
+    seaBtn.setAttribute('aria-pressed', String(v));
+    if (locked >= 0) setLockLabel(locked);
+  }
+  seaBtn.addEventListener('click', () => { if (locked >= 0) setSeaView(!seaView); });
+
+  // ---- The moon as play / pause (sea view only) ----
+  const MOON_R = Math.sin(2.2 * Math.PI / 180);
+  const moonV = new THREE.Vector3();
+  let moonHover = 0, moonPhase = 0, moonPulseAt = -99, moonHoverOn = false;
+  const moonActive = () => locked >= 0 && seaView && seaP > 0.85;
+  function overMoon(x, y) {
+    moonV.copy(camera.position).addScaledVector(moonDir, 400).project(camera);
+    if (moonV.z > 1) return false;
+    const mx = (moonV.x + 1) / 2 * innerWidth, my = (1 - moonV.y) / 2 * innerHeight;
+    const rPx = MOON_R / Math.tan(camera.fov * Math.PI / 360) * innerHeight / 2;
+    return Math.hypot(x - mx, y - my) < rPx * 1.6 + 8;   // a forgiving target around a small disc
+  }
+  function setMusicPaused(v) {
+    musicPaused = v;
+    syncAudio();
+  }
+  function toggleMusic() {
+    setMusicPaused(!musicPaused);
+    moonPulseAt = performance.now() / 1000;
+    closeTimer = 0;
+  }
+
+  function setLockLabel(idx) {
+    const r = Math.floor(idx / COLS) + 1, c = idx % COLS + 1;
+    coord.textContent = '已锁定 · 第 ' + r + ' 行 第 ' + c + ' 列' +
+      (seaView ? ' · 观海中，点击月亮暂停或播放' : ' · 按住拖动切换相邻方块');
+    coord.hidden = false;
+  }
+  function lockCube(idx) {
+    musicPaused = false;
+    ensureAudio();                 // must happen inside the click/tap so the browser allows sound
+    if (!playing) setPlaying(true); else syncAudio();
+    locked = idx;
+    focusCell = idx;
+    active.add(idx);
+    hovered = -1;
+    U.uFocusEdge.value = Math.min(1, lift[idx] + 0.2);   // it was glowing as the hovered cube; fade from there
+    setSeaView(false);
+    setLockLabel(idx);
+    lockBtn.hidden = false;
+    seaBtn.hidden = false;
+    document.body.style.cursor = 'grab';
+  }
+  // Hand the close-up, the beam and the music over to a neighbouring cube
+  function switchTo(idx) {
+    if (idx === locked || idx < 0) return;
+    stopSession();
+    sessionFor = -1;
+    if (musicPaused) setMusicPaused(false);     // a new cube always gets to sing
+    locked = idx;
+    focusCell = idx;
+    active.add(idx);
+    closeTimer = 0;
+    setLockLabel(idx);
+  }
+  // Screen direction → grid neighbour: right/left = next column, up = the row further out to sea
+  function neighbour(idx, dir) {
+    let c = idx % COLS, r = Math.floor(idx / COLS);
+    if (dir === 'right') c++; else if (dir === 'left') c--;
+    else if (dir === 'up') r++; else if (dir === 'down') r--;
+    if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return -1;
+    return r * COLS + c;
+  }
+
+  // ---- Drag to switch (only while a cube is locked) ----
+  const DRAG_STEP = 70;            // px of travel that hands over to the next cube
+  const drag = { on: false, id: null, x0: 0, y0: 0, moved: false, dx: 0, dy: 0 };
+  const nudge = new THREE.Vector2(); // eased camera lean that follows the drag
+
+  function dragStart(ev) {
+    drag.on = true; drag.id = ev.pointerId; drag.moved = false;
+    drag.x0 = ev.clientX; drag.y0 = ev.clientY; drag.dx = 0; drag.dy = 0;
+    closeTimer = 0;
+    document.body.style.cursor = 'grabbing';
+  }
+  function dragMove(ev) {
+    if (!drag.on || ev.pointerId !== drag.id) return;
+    drag.dx = ev.clientX - drag.x0;
+    drag.dy = ev.clientY - drag.y0;
+    if (!drag.moved && Math.hypot(drag.dx, drag.dy) > 8) drag.moved = true;
+    if (!drag.moved || locked < 0) return;
+    const ax = Math.abs(drag.dx), ay = Math.abs(drag.dy);
+    if (Math.max(ax, ay) < DRAG_STEP) return;
+    const dir = ax > ay ? (drag.dx > 0 ? 'right' : 'left') : (drag.dy < 0 ? 'up' : 'down');
+    const n = neighbour(locked, dir);
+    if (n >= 0) switchTo(n);
+    // Re-anchor so a long drag keeps stepping cube by cube
+    drag.x0 = ev.clientX; drag.y0 = ev.clientY; drag.dx = 0; drag.dy = 0;
+  }
+  function dragEnd(ev) {
+    if (!drag.on || (ev && ev.pointerId !== drag.id)) return;
+    const wasClick = !drag.moved;
+    drag.on = false; drag.dx = 0; drag.dy = 0;
+    if (wasClick && ev && ev.type === 'pointerup') unlock();   // a plain click still leaves the close-up
+    document.body.style.cursor = locked >= 0 ? 'grab' : '';
+  }
+  addEventListener('pointermove', dragMove, { passive: true });
+  addEventListener('pointerup', dragEnd);
+  addEventListener('pointercancel', dragEnd);
+  function unlock() {
+    if (locked < 0) return;
+    locked = -1;
+    stopSession();
+    sessionFor = -1;
+    if (musicPaused) setMusicPaused(false);
+    document.body.style.cursor = '';
+    // Leaving from the wide shot: fold the pull-back into focusP so the camera doesn't dip toward the cube
+    focusP = Math.min(focusP, 1 - seaP);
+    seaP = 0;
+    setSeaView(false);
+    coord.hidden = true;
+    lockBtn.hidden = true;
+    seaBtn.hidden = true;
+  }
+  lockBtn.addEventListener('click', unlock);
+  addEventListener('keydown', (ev) => { if (ev.key === 'Escape') { if (catTarget > 0) catTarget = 0; else unlock(); } });
+
+  function updateLift(tt, dt) {
+    const prev = hovered;
+    hovered = locked >= 0 ? -1 : pick(tt);
+    if (hovered >= 0) active.add(hovered);
+    if ((hovered >= 0) !== (prev >= 0)) document.body.style.cursor = hovered >= 0 ? 'pointer' : '';
+
+    if (pendingTap) {
+      const tap = pendingTap; pendingTap = null;
+      if (locked >= 0) unlock();
+      else if (hovered >= 0) {
+        // Mouse: left click locks. Touch: first tap lifts, tapping the floating cube again locks.
+        if (tap === 'mouse' || (hovered === prev && lift[hovered] > 0.4)) lockCube(hovered);
+      }
+    }
+
+    if (!active.size) return;
+    const up = 1 - Math.exp(-dt * 4.0);
+    const down = 1 - Math.exp(-dt * 1.8);
+    for (const idx of active) {
+      const target = (idx === hovered || idx === locked) ? 1 : 0;
+      let v = lift[idx];
+      v += (target - v) * (target ? up : down);
+      if (!target && v < 0.002) { v = 0; active.delete(idx); }
+      lift[idx] = v;
+      spinRaw[idx] += (playing ? dt : 0) * SPIN_SPEED * v;
+      const q = Math.round(spinRaw[idx] / QUARTER) * QUARTER;
+      spin[idx] = q + (spinRaw[idx] - q) * v;
+      if (v === 0) { spinRaw[idx] = 0; spin[idx] = 0; }   // back at rest: square again, start fresh next time
+    }
+    liftAttr.needsUpdate = true;
+    spinAttr.needsUpdate = true;
+  }
+
+  addEventListener('pointermove', (ev) => {
+    px = ev.clientX; py = ev.clientY;
+    if (ev.pointerType === 'mouse' || ev.pointerType === 'pen') pointerIn = true;
+  }, { passive: true });
+  addEventListener('pointerdown', (ev) => {
+    if (ev.target.closest && ev.target.closest('button, .panel, .player')) return;
+    if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+    if (outro.done) { restartFromDark(); return; }
+    if (outro.on || outro.pending) return;
+    px = ev.clientX; py = ev.clientY; pointerIn = true;
+    ensureAudio(playing || locked < 0);   // unlock sound inside the gesture itself
+    if (moonActive() && overMoon(ev.clientX, ev.clientY)) { toggleMusic(); return; }
+    if (locked < 0 && U.uIntro.value >= 1 && overMoon(ev.clientX, ev.clientY)) { moonTap(); return; }
+    if (catTarget > 0) { catTarget = 0; return; }        // any click while the cat stands sends the cubes home
+    if (locked >= 0) { dragStart(ev); return; }   // in the close-up: click leaves, drag switches
+    pendingTap = ev.pointerType === 'touch' ? 'touch' : 'mouse';
+    clearTimeout(touchTimer);
+    if (ev.pointerType === 'touch') touchTimer = setTimeout(() => { pointerIn = false; }, 3000);
+  }, { passive: true });
+  document.documentElement.addEventListener('pointerleave', () => { pointerIn = false; });
+  addEventListener('blur', () => { pointerIn = false; });
+
+  // ================= Lyrics =================
+  // One canvas, shared by two placements: a sheet of words on the singing cube (close-up)
+  // and a line of words in the sky just under the moon (sea view). Lines light up karaoke-style.
+  const LYR_W = 1024, LYR_H = 256;
+  const lyrCanvas = document.createElement('canvas');
+  lyrCanvas.width = LYR_W; lyrCanvas.height = LYR_H;
+  const lyr2d = lyrCanvas.getContext('2d');
+  const lyrTex = new THREE.CanvasTexture(lyrCanvas);
+  lyrTex.minFilter = THREE.LinearFilter;
+  const LYR_FONT = '"Noto Serif SC", "Songti SC", "STSong", "SimSun", serif';
+  let lyricDirty = true, lyrText = '', lyrProg = -1;
+
+  function drawLyric(text, prog) {
+    lyr2d.clearRect(0, 0, LYR_W, LYR_H);
+    if (!text) return;
+    let size = 96;
+    lyr2d.font = '300 ' + size + 'px ' + LYR_FONT;
+    while (size > 40 && lyr2d.measureText(text).width > LYR_W - 80) {
+      size -= 4;
+      lyr2d.font = '300 ' + size + 'px ' + LYR_FONT;
+    }
+    const w = lyr2d.measureText(text).width;
+    const x0 = (LYR_W - w) / 2, y = LYR_H / 2;
+    lyr2d.textBaseline = 'middle';
+    lyr2d.textAlign = 'left';
+    lyr2d.shadowColor = 'rgba(255,255,255,0.55)';
+    lyr2d.shadowBlur = 18;
+    lyr2d.fillStyle = 'rgba(255,255,255,0.32)';       // the whole line, faint
+    lyr2d.fillText(text, x0, y);
+    lyr2d.save();                                       // the part already sung, bright
+    lyr2d.beginPath();
+    lyr2d.rect(x0 - 10, 0, (w + 20) * prog, LYR_H);
+    lyr2d.clip();
+    lyr2d.fillStyle = '#ffffff';
+    lyr2d.fillText(text, x0, y);
+    lyr2d.restore();
+  }
+
+  function lyricMat() {
+    return new THREE.MeshBasicMaterial({ map: lyrTex, transparent: true, depthWrite: false, fog: false, opacity: 0 });
+  }
+  const plane = new THREE.PlaneGeometry(1, LYR_H / LYR_W);
+  const skyLyric = new THREE.Mesh(plane, lyricMat());
+  skyLyric.renderOrder = 1;
+  skyLyric.visible = false;
+  scene.add(skyLyric);
+
+  // Square face canvas: the line set in a character grid sized to one face of the cube
+  const FACE = 512;
+  const faceCanvas = document.createElement('canvas');
+  faceCanvas.width = faceCanvas.height = FACE;
+  const face2d = faceCanvas.getContext('2d');
+  const faceTex = new THREE.CanvasTexture(faceCanvas);
+  faceTex.minFilter = THREE.LinearFilter;
+  function drawFace(text, prog) {
+    face2d.clearRect(0, 0, FACE, FACE);
+    const chars = Array.from((text || '').replace(/\s+/g, ''));
+    if (!chars.length) return;
+    const rows = chars.length <= 5 ? 1 : chars.length <= 12 ? 2 : 3;
+    const perRow = Math.ceil(chars.length / rows);
+    // Smaller type set close together: characters sit near each other in the middle of the face
+    const fontPx = Math.floor(Math.min((FACE - 70) / perRow, (FACE - 90) / rows / 1.15) * 0.6);
+    const cell = fontPx * 1.04;                         // advance per character
+    const lineH = fontPx * 1.32;                        // advance per row
+    face2d.font = '300 ' + fontPx + 'px ' + LYR_FONT;
+    face2d.textAlign = 'center';
+    face2d.textBaseline = 'middle';
+    face2d.shadowColor = 'rgba(255,255,255,0.6)';
+    face2d.shadowBlur = 14;
+    const lit = prog * chars.length;                   // characters sung so far (fractional)
+    const top = FACE / 2 - (rows - 1) * lineH / 2;
+    chars.forEach((ch, k) => {
+      const r = Math.floor(k / perRow), c = k % perRow;
+      const inRow = Math.min(perRow, chars.length - r * perRow);
+      const x = FACE / 2 + (c - (inRow - 1) / 2) * cell;
+      const y = top + r * lineH;
+      const on = Math.max(0, Math.min(1, lit - k));
+      face2d.fillStyle = 'rgba(255,255,255,' + (0.3 + 0.7 * on).toFixed(3) + ')';
+      face2d.fillText(ch, x, y);
+    });
+  }
+  // Corner view: the camera looks straight at one vertical edge from above, so three faces show at once
+  // (top = lyrics, left = cover, right = title and singer)
+  const CORNER_AZ = Math.atan2(0.9, 3.0);              // same bearing as the ordinary close-up
+  const CORNER_EL = Math.asin(1 / Math.sqrt(3));       // 35.3°: the isometric angle, all three faces equal
+  const CORNER_D = 3.0;
+
+  const faceHolder = new THREE.Object3D();          // follows the held cube exactly
+  function facePlane(tex) {
+    const mm = new THREE.Mesh(new THREE.PlaneGeometry(0.78, 0.78),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, opacity: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+    mm.renderOrder = 5;
+    mm.visible = false;
+    faceHolder.add(mm);
+    return mm;
+  }
+  function squareCanvas() {
+    const cv = document.createElement('canvas');
+    cv.width = cv.height = FACE;
+    const tex = new THREE.CanvasTexture(cv);
+    tex.minFilter = THREE.LinearFilter;
+    return { g: cv.getContext('2d'), tex };
+  }
+  const coverC = squareCanvas(), infoC = squareCanvas();
+  const cubeLyric = facePlane(faceTex);       // top face
+  const coverFace = facePlane(coverC.tex);    // left face
+  const infoFace = facePlane(infoC.tex);      // right face
+  // Songs without lyrics: the credits ride round on all four sides and show on whichever one faces the camera
+  const infoSides = [0, 1, 2, 3].map(() => facePlane(infoC.tex));
+  const camLocal = new THREE.Vector3(), qInv = new THREE.Quaternion();
+  scene.add(faceHolder);
+  let facesFor = null;                         // the session whose cover and credits are drawn
+
+  const css = (c, k = 1, a = 1) =>
+    'rgba(' + [c.r, c.g, c.b].map((v) => Math.min(255, Math.round(v * k * 255))).join(',') + ',' + a + ')';
+
+  // Cover art for a generated song: its night palette, its moon, and its melody as a row of stacked cubes
+  function drawCover(s) {
+    const { g, tex } = coverC, W = FACE;
+    if (s.isTrack) {
+      g.clearRect(0, 0, W, W);
+      let drawn = false;
+      if (s.coverImg) {
+        g.drawImage(s.coverImg, 0, 0, W, W);
+        // Some browsers treat local images as foreign on file:// pages; an unreadable canvas can't become a
+        // texture, so fall back to the placeholder instead of stalling the scene
+        try { g.getImageData(0, 0, 1, 1); drawn = true; } catch (err) { g.clearRect(0, 0, W, W); }
+      }
+      if (!drawn) {
+        // Cover still loading (or none): the song's colour and its first character
+        const pal = paletteFor(s);
+        const bg = g.createLinearGradient(0, 0, W, W);
+        bg.addColorStop(0, css(pal.horizon, 2.4)); bg.addColorStop(1, css(pal.zenith, 2));
+        g.fillStyle = bg; g.fillRect(0, 0, W, W);
+        g.fillStyle = css(pal.light, 1, 0.85);
+        g.font = '300 ' + Math.floor(W * 0.42) + 'px ' + LYR_FONT;
+        g.textAlign = 'center'; g.textBaseline = 'middle';
+        g.fillText(Array.from(s.title)[0] || '♪', W / 2, W / 2);
+      }
+      g.strokeStyle = 'rgba(255,255,255,0.5)';
+      g.lineWidth = 3;
+      g.strokeRect(16, 16, W - 32, W - 32);
+      tex.needsUpdate = true;
+      return;
+    }
+    const pal = paletteFor(s);
+    g.clearRect(0, 0, W, W);
+    const bg = g.createLinearGradient(0, 0, 0, W);
+    bg.addColorStop(0, css(pal.zenith, 2.4));
+    bg.addColorStop(0.62, css(pal.horizon, 1.7));
+    bg.addColorStop(1, css(pal.sea, 0.7));
+    g.fillStyle = bg;
+    g.fillRect(0, 0, W, W);
+    const mx = W * 0.68, my = W * 0.28, mr = W * 0.12;
+    const halo = g.createRadialGradient(mx, my, mr * 0.8, mx, my, mr * 3.2);
+    halo.addColorStop(0, css(pal.light, 1, 0.45));
+    halo.addColorStop(1, css(pal.light, 1, 0));
+    g.fillStyle = halo;
+    g.fillRect(0, 0, W, W);
+    g.fillStyle = css(pal.light, 1.15);
+    g.beginPath(); g.arc(mx, my, mr, 0, Math.PI * 2); g.fill();
+    // One column per eighth note of the motif; column height follows the scale degree, rests stay flat
+    const n = s.motif.length, cell = W * 0.84 / n, x0 = W * 0.08, base = W * 0.9;
+    s.motif.forEach((d, k) => {
+      const h = d < 0 ? 0 : (d % 7) + 1 + (d >= 7 ? 2 : 0);
+      for (let j = 0; j <= h; j++) {
+        g.fillStyle = j === 0 ? css(pal.light, 1, 0.25) : css(pal.light, 1.1, 0.35 + 0.65 * j / 10);
+        g.fillRect(x0 + k * cell + 2, base - (j + 1) * cell * 0.92, cell - 4, cell * 0.92 - 4);
+      }
+    });
+    g.strokeStyle = css(pal.light, 1, 0.6);
+    g.lineWidth = 3;
+    g.strokeRect(16, 16, W - 32, W - 32);
+    tex.needsUpdate = true;
+  }
+
+  // Credits: song title, singer, key and tempo
+  function drawInfo(s, idx) {
+    const { g, tex } = infoC, W = FACE;
+    g.clearRect(0, 0, W, W);
+    if (s.isTrack) {
+      const fit = (text, start, min, maxW, weight) => {
+        let size = start;
+        g.font = weight + ' ' + size + 'px ' + LYR_FONT;
+        while (size > min && g.measureText(text).width > maxW) { size -= 2; g.font = weight + ' ' + size + 'px ' + LYR_FONT; }
+      };
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.shadowColor = 'rgba(255,255,255,0.55)'; g.shadowBlur = 12;
+      fit(s.title, 60, 24, W - 80, '300');
+      g.fillStyle = '#ffffff';
+      g.fillText(s.title, W / 2, W * 0.38);
+      g.shadowBlur = 0;
+      g.fillStyle = 'rgba(255,255,255,0.45)';
+      g.fillRect(W * 0.32, W * 0.5, W * 0.36, 2);
+      g.shadowBlur = 10;
+      if (s.artist) { fit('演唱 · ' + s.artist, 34, 18, W - 80, '300'); g.fillStyle = 'rgba(255,255,255,0.92)'; g.fillText('演唱 · ' + s.artist, W / 2, W * 0.61); }
+      if (s.album) { fit(s.album, 24, 14, W - 90, '300'); g.fillStyle = 'rgba(255,255,255,0.6)'; g.fillText(s.album, W / 2, W * 0.72); }
+      if (s.failText) { g.font = '300 22px ' + LYR_FONT; g.fillStyle = 'rgba(255,190,190,0.95)'; g.fillText(s.failText, W / 2, W * 0.84); }
+      else if (s.swatches && s.swatches.length) {
+        // The colours read from the cover, as a row of small squares; the first one is the scene's tone
+        g.shadowBlur = 0;
+        const n = s.swatches.length, sz = 26, gap = 10, x0 = W / 2 - (n * sz + (n - 1) * gap) / 2, y0 = W * 0.82;
+        s.swatches.forEach((c, i) => {
+          g.fillStyle = css(c);
+          g.fillRect(x0 + i * (sz + gap), y0, sz, sz);
+          g.strokeStyle = 'rgba(255,255,255,' + (i === 0 ? 0.9 : 0.35) + ')';
+          g.lineWidth = i === 0 ? 2 : 1;
+          g.strokeRect(x0 + i * (sz + gap) + 0.5, y0 + 0.5, sz - 1, sz - 1);
+        });
+      }
+      tex.needsUpdate = true;
+      return;
+    }
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.shadowColor = 'rgba(255,255,255,0.55)';
+    g.shadowBlur = 12;
+    let size = 66;
+    g.font = '300 ' + size + 'px ' + LYR_FONT;
+    while (size > 28 && g.measureText(s.title).width > W - 90) { size -= 2; g.font = '300 ' + size + 'px ' + LYR_FONT; }
+    g.fillStyle = '#ffffff';
+    g.fillText(s.title, W / 2, W * 0.4);
+    g.shadowBlur = 0;
+    g.fillStyle = 'rgba(255,255,255,0.45)';
+    g.fillRect(W * 0.32, W * 0.52, W * 0.36, 2);
+    g.shadowBlur = 10;
+    g.font = '300 34px ' + LYR_FONT;
+    g.fillStyle = 'rgba(255,255,255,0.92)';
+    g.fillText('演唱 · 方块 №' + (idx + 1).toLocaleString('zh-CN'), W / 2, W * 0.62);
+    g.font = '24px "IBM Plex Mono", ui-monospace, monospace';
+    g.fillStyle = 'rgba(255,255,255,0.62)';
+    g.fillText(NOTE_NAMES[s.root % 12] + ' ' + s.mode.name + ' · ' + s.bpm + ' BPM', W / 2, W * 0.73);
+    tex.needsUpdate = true;
+  }
+
+  // Steering for the held cube (mirrors the shader's spin, tilt and bob)
+  let holdCell = -1, holdW = 0, holdSet = false, holdYaw = 0, holdK = 0;
+  const HOLD_TILT = 0;                                 // top face level, so the lyrics lie flat
+  const fr = (v) => v - Math.floor(v);
+  const yawDefault = (idx) => spin[idx];               // the same free-spin angle the shader is using
+  const UP = new THREE.Vector3(0, 1, 0), AX_X = new THREE.Vector3(1, 0, 0);
+  const qR = new THREE.Quaternion(), qT = new THREE.Quaternion(), qS = new THREE.Quaternion(), nTmp = new THREE.Vector3();
+  const SKY_LYR_ELEV = 5.2 * Math.PI / 180;            // under the moon (12.4°) and its progress line, above the horizon
+  const skyLyrDir = new THREE.Vector3(0, Math.sin(SKY_LYR_ELEV), -Math.cos(SKY_LYR_ELEV));
+  const toCam = new THREE.Vector3(), lyrTint = new THREE.Color();
+  const smooth5 = (p) => p * p * p * (p * (p * 6 - 15) + 10);
+
+  function updateLyrics(dt, tt) {
+    const S = session;
+    let text = '', prog = 0, alpha = 0;
+    if (S && S.kind === 'track') {
+      if (S.lrc && actx) {
+        const tn = S.elapsed(), L = S.lrc;
+        const clamp01 = (v) => Math.max(0, Math.min(1, v));
+        if (tn < L[0].t) {
+          text = S.s.title; prog = 1;                    // before the first line: the song's title
+          alpha = clamp01(tn / 0.4) * clamp01((L[0].t - tn) / 0.35);
+        } else {
+          if (S.li >= L.length || L[S.li].t > tn) S.li = 0;
+          while (S.li + 1 < L.length && L[S.li + 1].t <= tn) S.li++;
+          const a = L[S.li].t, b = S.li + 1 < L.length ? L[S.li + 1].t : a + 6;
+          text = L[S.li].text;
+          prog = clamp01((tn - a) / Math.max(0.6, (b - a) * 0.85));
+          alpha = clamp01((tn - a) / 0.25) * clamp01((b - tn) / 0.25);
+        }
+      }
+    } else if (S && S.s.lyrics && actx) {
+      const rel = actx.currentTime - S.startAt;
+      const D = S.stepDur * 16;                          // one line per two-bar phrase
+      const env = (x) => Math.max(0, Math.min(1, x / 0.35, (D - x) / 0.35));
+      if (rel >= 0 && rel < D) { text = S.s.title; prog = 1; alpha = env(rel); }     // the intro shows the title
+      else if (rel >= D) {
+        const k = Math.floor(rel / D) - 1, lt = rel - (k + 1) * D;
+        text = S.s.lyrics[k % S.s.lyrics.length];
+        prog = Math.min(1, lt / (D * 0.75));
+        alpha = env(lt);
+      }
+    }
+    if (text !== lyrText || Math.abs(prog - lyrProg) > 0.004 || lyricDirty) {
+      lyrText = text; lyrProg = prog; lyricDirty = false;
+      drawLyric(text, prog);
+      lyrTex.needsUpdate = true;
+      drawFace(text, prog);
+      faceTex.needsUpdate = true;
+    }
+
+    if (S && facesFor !== S) { drawCover(S.s); drawInfo(S.s, S.s.idx); facesFor = S; }
+
+    // ---- Hold: once the song starts, the camera rises to look down at the cube and the cube levels its top.
+    // With lyrics it turns a corner to the camera and stays there; without, it keeps turning slowly. ----
+    const lyricMode = !!(S && S.s.lyrics);
+    const want = !!(S && actx && locked >= 0 && focusCell === locked && actx.currentTime >= S.startAt - 0.5);
+    if (holdCell !== focusCell) {
+      holdW = Math.max(0, holdW - dt / 1.0);              // release the previous cube before taking the next
+      if (holdW === 0) { holdCell = focusCell; holdSet = false; }
+    } else if (want) {
+      const d = yawDefault(holdCell);
+      if (!holdSet && holdCell >= 0) { holdYaw = d; holdSet = true; }
+      let target = d;                                     // no lyrics: follow the slow free spin
+      if (lyricMode) {
+        const base = CORNER_AZ - Math.PI / 4;              // spin that points a vertical edge at the camera
+        holdK = Math.round((holdYaw - base) / (Math.PI / 2));   // the corner already nearest, so the turn is short
+        target = base + holdK * Math.PI / 2;
+      }
+      holdYaw += (target - holdYaw) * (1 - Math.exp(-dt * (lyricMode ? 2.4 : 10)));
+      holdW = Math.min(1, holdW + dt / 1.6);
+      if (lyricMode && holdW >= 1) {
+        // Keep the held angle within half a turn of the free spin (same pose, shifted by whole turns),
+        // so letting go later eases back gently instead of whirling through the turns it skipped
+        holdYaw += Math.PI * 2 * Math.round((d - holdYaw) / (Math.PI * 2));
+      }
+    } else {
+      holdW = Math.max(0, holdW - dt / 1.2);
+      if (holdW === 0) holdSet = false;
+    }
+    const w = smooth5(holdW);
+    if (holdCell >= 0) U.uHoldPos.value.set(cellX(holdCell), cellZ(holdCell));
+    else U.uHoldPos.value.set(9999, 9999);
+    U.uHoldYaw.value = holdYaw;
+    U.uHoldTilt.value = HOLD_TILT;
+    U.uHoldW.value = w;
+
+    // Tint the words with the scene's light, kept close to white so they stay legible
+    lyrTint.copy(U.uLightCol.value).lerp(new THREE.Color(1, 1, 1), 0.45);
+    const closeK = smooth5(focusP) * (1 - smooth5(seaP));
+    const farK = locked >= 0 ? smooth5(seaP) : 0;
+
+    // Words printed on that face: rebuild the cube's exact pose (wave, lift, bob, tilt, spin) each frame
+    const panelK = holdCell >= 0 && holdCell === focusCell ? closeK * w : 0;
+    cubeLyric.material.opacity = lyricMode ? alpha * panelK : 0;   // lyric lines fade in and out
+    coverFace.material.opacity = panelK;                            // the cover stays
+    infoFace.material.opacity = lyricMode ? panelK : 0;
+    cubeLyric.visible = cubeLyric.material.opacity > 0.005;
+    coverFace.visible = panelK > 0.005;
+    infoFace.visible = infoFace.material.opacity > 0.005;
+    if (panelK <= 0.005 || lyricMode) infoSides.forEach((m) => { m.visible = false; });
+    if (panelK > 0.005) {
+      const idx = holdCell, L = lift[idx], x = cellX(idx), z = cellZ(idx);
+      const [gx, gz] = slope(x, z, tt);
+      const y = hAt(x, z, tt) + L * (2.3 + 0.18 * Math.sin(tt * 1.7 + fr(x * 0.3713 + z * 0.7191) * Math.PI * 2));
+      const sa = yawDefault(idx, L, tt) * (1 - w) + holdYaw * w;
+      const ta = L * 0.42 * (1 - w) + HOLD_TILT * w;
+      nTmp.set(-gx * 0.75, 1, -gz * 0.75).lerp(UP, L).normalize();
+      qR.setFromUnitVectors(UP, nTmp);
+      qT.setFromAxisAngle(AX_X, ta);
+      qS.setFromAxisAngle(UP, sa);
+      faceHolder.position.set(x, y, z);
+      faceHolder.quaternion.copy(qR).multiply(qT).multiply(qS);
+      if (lyricMode) {
+        // ac: local bearing of the corner facing the camera; the side faces sit 45° either side of it
+        const ac = CORNER_AZ - holdYaw;
+        const aL = ac - Math.PI / 4, aR = ac + Math.PI / 4;
+        coverFace.position.set(Math.sin(aL) * 0.402, 0, Math.cos(aL) * 0.402);
+        coverFace.rotation.set(0, aL, 0);
+        infoFace.position.set(Math.sin(aR) * 0.402, 0, Math.cos(aR) * 0.402);
+        infoFace.rotation.set(0, aR, 0);
+        // Top face: lying flat, turned so each line reads left-to-right from the camera
+        cubeLyric.position.set(0, 0.402, 0);
+        cubeLyric.rotation.set(-Math.PI / 2, ac, 0, 'YXZ');
+        cubeLyric.material.color.copy(lyrTint);
+        infoFace.material.color.copy(lyrTint);
+      } else {
+        // Cover lies on the top face and turns with the cube
+        coverFace.position.set(0, 0.402, 0);
+        coverFace.rotation.set(-Math.PI / 2, 0, 0, 'YXZ');
+        // Credits: on each side face, brightest while that face turns toward the camera, gone as it turns away
+        qInv.copy(faceHolder.quaternion).invert();
+        camLocal.copy(camera.position).sub(faceHolder.position).applyQuaternion(qInv);
+        const hl = Math.hypot(camLocal.x, camLocal.z) || 1;
+        infoSides.forEach((m, k) => {
+          const a = k * Math.PI / 2;
+          const facing = (camLocal.x * Math.sin(a) + camLocal.z * Math.cos(a)) / hl;   // cos of the angle to the camera
+          const op = panelK * Math.max(0, Math.min(1, (facing - 0.72) / 0.18));
+          m.material.opacity = op;
+          m.visible = op > 0.005;
+          if (m.visible) {
+            m.position.set(Math.sin(a) * 0.402, 0, Math.cos(a) * 0.402);
+            m.rotation.set(0, a, 0);
+            m.material.color.copy(lyrTint);
+          }
+        });
+      }
+    }
+
+    skyLyric.material.opacity = alpha * farK * 0.92;
+    skyLyric.visible = skyLyric.material.opacity > 0.005;
+    if (skyLyric.visible) {
+      skyLyric.position.copy(camera.position).addScaledVector(skyLyrDir, 300);
+      skyLyric.quaternion.copy(camera.quaternion);
+      skyLyric.scale.setScalar(52);
+      skyLyric.material.color.copy(lyrTint);
+    }
+  }
+
+  // ================= Sea-view visitors =================
+  // Small things that drift by while you watch from afar: paper boats, a school of leaping fish,
+  // a whale's tail, a cluster of floating lanterns. Built from boxes and wedges to match the cubes.
+  const propMats = {
+    paper: new THREE.MeshStandardMaterial({ color: 0xe6e1d4, roughness: 0.85, flatShading: true, side: THREE.DoubleSide }),
+    fish: new THREE.MeshStandardMaterial({ color: 0xb6c4da, roughness: 0.28, metalness: 0.65 }),
+    whale: new THREE.MeshStandardMaterial({ color: 0x1b2536, roughness: 0.65, metalness: 0.12 }),
+    lantern: new THREE.MeshStandardMaterial({ color: 0x5a3010, emissive: 0xffb257, emissiveIntensity: 1.5, roughness: 0.6 }),
+    cap: new THREE.MeshStandardMaterial({ color: 0x24170d, roughness: 0.8 }),
+    drop: new THREE.MeshBasicMaterial({ color: 0xdfe9ff })
+  };
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  function box(mat, sx, sy, sz, x = 0, y = 0, z = 0) {
+    const mm = new THREE.Mesh(unitBox, mat);
+    mm.scale.set(sx, sy, sz); mm.position.set(x, y, z);
+    return mm;
+  }
+  function triGeo(list) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(list.flat(2), 3));
+    g.computeVertexNormals();
+    return g;
+  }
+  // Origami boat: an open wedge hull and a folded two-panel sail
+  const P = { a: [-0.9, 0, 0.32], b: [0.9, 0, 0.32], c: [0.9, 0, -0.32], d: [-0.9, 0, -0.32], e: [-0.5, -0.3, 0], f: [0.5, -0.3, 0] };
+  const hullGeo = triGeo([
+    [P.a, P.e, P.f], [P.a, P.f, P.b], [P.d, P.c, P.f], [P.d, P.f, P.e], [P.a, P.d, P.e], [P.b, P.f, P.c]
+  ]);
+  const sailGeo = triGeo([
+    [[-0.5, 0, 0], [0.5, 0, 0], [0.05, 0.85, 0.14]],
+    [[-0.5, 0, 0], [0.05, 0.85, -0.14], [0.5, 0, 0]]
+  ]);
+  const glowTex = (() => {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+    const g2 = cv.getContext('2d');
+    const gr = g2.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g2.fillStyle = gr; g2.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(cv);
+  })();
+
+  const props = [];
+  let propTimer = 1.2, propsWanted = false;
+  const tmpW = new THREE.Vector3();
+
+  function slope(x, z, tt) {
+    return [(hAt(x + 0.4, z, tt) - hAt(x - 0.4, z, tt)) / 0.8, (hAt(x, z + 0.4, tt) - hAt(x, z - 0.4, tt)) / 0.8];
+  }
+  // A spot on the sea inside the wide shot, kept clear of the singing cube
+  function randSpot(near, far) {
+    const tanH = Math.tan(camera.fov * Math.PI / 360) * camera.aspect;
+    for (let k = 0; k < 8; k++) {
+      const z = -(near + Math.random() * (far - near));
+      const half = (camBase.z - z) * tanH * 0.68;
+      const x = (Math.random() * 2 - 1) * half;
+      if (focusCell < 0 || Math.hypot(x - cellX(focusCell), z - cellZ(focusCell)) > 5) return { x, z };
+    }
+    return { x: -12, z: -30 };
+  }
+  function splash(p, x, y, z, n, power) {
+    for (let k = 0; k < n; k++) {
+      const mm = box(propMats.drop, 0.09, 0.09, 0.09, x, y, z);
+      const a = Math.random() * Math.PI * 2, sp = (0.5 + Math.random()) * power;
+      p.drops.push({ m: mm, vx: Math.cos(a) * sp, vy: (2.0 + Math.random() * 2.2) * power, vz: Math.sin(a) * sp, life: 0 });
+      scene.add(mm);
+    }
+  }
+  const fade = (p) => Math.min(1, p.age / 1.0) * Math.min(1, Math.max(0, (p.life - p.age) / 1.5));
+
+  function makeBoat() {
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(hullGeo, propMats.paper), new THREE.Mesh(sailGeo, propMats.paper));
+    const s = randSpot(8, 40);
+    const heading = (Math.random() < 0.5 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.7;
+    const sp = 0.45 + Math.random() * 0.3, ph = Math.random() * 6.28;
+    return {
+      kind: 'boat', group: g, life: 16 + Math.random() * 6, drops: [], soft: true,
+      x: s.x, z: s.z,
+      update(p, dt, tt) {
+        p.x += Math.cos(heading) * sp * dt; p.z -= Math.sin(heading) * sp * dt;
+        const [gx, gz] = slope(p.x, p.z, tt);
+        g.position.set(p.x, hAt(p.x, p.z, tt) + 0.38, p.z);
+        g.rotation.set(-Math.atan(gz) * 0.9 + Math.sin(tt * 1.4 + ph) * 0.05, heading, Math.atan(gx) * 0.9, 'YXZ');
+        g.scale.setScalar(1.3 * fade(p));
+      }
+    };
+  }
+
+  function makeFish() {
+    const g = new THREE.Group();
+    const s = randSpot(6, 30);
+    const ang = Math.random() * Math.PI * 2, dx = Math.cos(ang), dz = Math.sin(ang);
+    const n = 2 + Math.floor(Math.random() * 3);
+    const fish = [];
+    for (let k = 0; k < n; k++) {
+      const fg = new THREE.Group();
+      const tail = box(propMats.fish, 0.2, 0.2, 0.04, -0.34, 0, 0); tail.rotation.z = Math.PI / 4;
+      fg.add(box(propMats.fish, 0.55, 0.2, 0.14), tail);
+      fg.visible = false;
+      g.add(fg);
+      const side = (k - (n - 1) / 2) * 0.6;
+      fish.push({
+        fg, delay: k * 0.22 + Math.random() * 0.15,
+        x0: s.x - dz * side + (Math.random() - 0.5) * 0.4, z0: s.z + dx * side + (Math.random() - 0.5) * 0.4,
+        L: 2.4 + Math.random() * 1.2, H: 1.3 + Math.random() * 0.9, T: 1.0 + Math.random() * 0.25, out: false, in: false
+      });
+    }
+    const life = Math.max(...fish.map((f) => f.delay + f.T)) + 1.8;
+    return {
+      kind: 'fish', group: g, life, drops: [],
+      update(p, dt, tt) {
+        for (const f of fish) {
+          const u = (p.age - f.delay) / f.T;
+          if (u < 0 || u > 1) { f.fg.visible = false; continue; }
+          f.fg.visible = true;
+          const x = f.x0 + dx * f.L * u, z = f.z0 + dz * f.L * u;
+          const h = hAt(x, z, tt);
+          const y = h + 0.05 + f.H * 4 * u * (1 - u) - 0.35;
+          f.fg.position.set(x, y, z);
+          f.fg.rotation.set(0, -ang, Math.atan2(f.H * 4 * (1 - 2 * u), f.L), 'YXZ');
+          if (!f.out && u > 0.08) { f.out = true; splash(p, x, h + 0.4, z, 6, 0.7); }
+          if (!f.in && u > 0.92) { f.in = true; splash(p, x, h + 0.4, z, 7, 0.75); }
+        }
+      }
+    };
+  }
+
+  function makeWhale() {
+    const g = new THREE.Group();
+    const tail = new THREE.Group();
+    tail.add(box(propMats.whale, 0.55, 2.3, 0.45, 0, 1.15, 0));
+    const lf = box(propMats.whale, 1.6, 0.22, 0.7, -0.75, 2.35, 0); lf.rotation.z = 0.32;
+    const rf = box(propMats.whale, 1.6, 0.22, 0.7, 0.75, 2.35, 0); rf.rotation.z = -0.32;
+    tail.add(lf, rf);
+    tail.scale.setScalar(1.4);
+    g.add(tail);
+    const s = randSpot(16, 42);
+    const yaw = (Math.random() - 0.5) * 1.0;
+    const tips = [new THREE.Vector3(-1.5, 2.6, 0), new THREE.Vector3(1.5, 2.6, 0)];
+    let dripT = 0, upSplash = false, downSplash = false;
+    const ease = (u) => 1 - Math.pow(1 - Math.min(1, Math.max(0, u)), 3);
+    return {
+      kind: 'whale', group: g, life: 7.6, drops: [],
+      update(p, dt, tt) {
+        const a = p.age, h = hAt(s.x, s.z, tt);
+        let y, rx;
+        if (a < 2.0) { const u = ease(a / 2.0); y = h - 4.2 + 3.2 * u; rx = 0.5 * (1 - u) + 0.05; }
+        else if (a < 3.6) { y = h - 1.0 + Math.sin((a - 2) * 2.2) * 0.08; rx = 0.05; }
+        else { const u = ease((a - 3.6) / 2.4); y = h - 1.0 - 3.4 * u; rx = 0.05 - 1.0 * u; }
+        g.position.set(s.x, y, s.z);
+        g.rotation.set(rx, yaw, Math.sin(a * 1.6) * 0.06, 'YXZ');
+        if (!upSplash && a > 0.7) { upSplash = true; splash(p, s.x, h + 0.4, s.z, 14, 1.1); }
+        if (!downSplash && a > 4.9) { downSplash = true; splash(p, s.x, h + 0.4, s.z, 16, 1.2); }
+        // Water running off the flukes while the tail is up
+        if (a > 1.6 && a < 4.4) {
+          dripT -= dt;
+          if (dripT <= 0) {
+            dripT = 0.12;
+            g.updateMatrixWorld();
+            const tip = tips[Math.random() < 0.5 ? 0 : 1];
+            tmpW.copy(tip).applyMatrix4(tail.matrixWorld);
+            const mm = box(propMats.drop, 0.07, 0.07, 0.07, tmpW.x, tmpW.y, tmpW.z);
+            p.drops.push({ m: mm, vx: 0, vy: 0, vz: 0, life: 0 });
+            scene.add(mm);
+          }
+        }
+      }
+    };
+  }
+
+  function makeLanterns() {
+    const g = new THREE.Group();
+    const s = randSpot(8, 34);
+    const n = 2 + Math.floor(Math.random() * 3);
+    const drift = (Math.random() - 0.5) * 0.5;
+    const ls = [];
+    for (let k = 0; k < n; k++) {
+      const lg = new THREE.Group();
+      lg.add(box(propMats.lantern, 0.42, 0.5, 0.42), box(propMats.cap, 0.52, 0.08, 0.52, 0, 0.29, 0), box(propMats.cap, 0.48, 0.06, 0.48, 0, -0.28, 0));
+      const sm = new THREE.SpriteMaterial({ map: glowTex, color: 0xffb860, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.7 });
+      const glow = new THREE.Sprite(sm); glow.scale.setScalar(2.6);
+      lg.add(glow);
+      g.add(lg);
+      ls.push({ lg, sm, x: s.x + (Math.random() - 0.5) * 4, z: s.z + (Math.random() - 0.5) * 3, ph: Math.random() * 6.28, spin: (Math.random() - 0.5) * 0.4 });
+    }
+    return {
+      kind: 'lantern', group: g, life: 18 + Math.random() * 4, drops: [], soft: true,
+      update(p, dt, tt) {
+        const f = fade(p);
+        for (const l of ls) {
+          l.x += drift * dt;
+          l.lg.position.set(l.x, hAt(l.x, l.z, tt) + 0.62 + Math.sin(tt * 1.3 + l.ph) * 0.06, l.z);
+          l.lg.rotation.y += l.spin * dt;
+          l.lg.scale.setScalar(1.25 * f);
+          l.sm.opacity = 0.7 * f * (0.85 + 0.15 * Math.sin(tt * 3.1 + l.ph));
+        }
+      },
+      dispose() { ls.forEach((l) => l.sm.dispose()); }
+    };
+  }
+
+  const KINDS = [['boat', 3], ['fish', 3], ['whale', 1.3], ['lantern', 2]];
+  const MAKERS = { boat: makeBoat, fish: makeFish, whale: makeWhale, lantern: makeLanterns };
+  function spawnProp() {
+    const pool = KINDS.filter(([k]) => !(k === 'whale' && props.some((p) => p.kind === 'whale')));
+    let r = Math.random() * pool.reduce((a, [, w]) => a + w, 0), kind = pool[0][0];
+    for (const [k, w] of pool) { if ((r -= w) <= 0) { kind = k; break; } }
+    const p = MAKERS[kind]();
+    p.age = 0;
+    scene.add(p.group);
+    props.push(p);
+  }
+
+  function updateProps(dt, tt) {
+    const want = moonActive();
+    if (want) {
+      propTimer -= dt;
+      if (propTimer <= 0 && props.length < 4) { spawnProp(); propTimer = 3.5 + Math.random() * 3.5; }
+    } else {
+      propTimer = 1.2;
+      // Leaving sea view: let soft things (boats, lanterns) fade out promptly; fish and whale finish their move
+      if (propsWanted) props.forEach((p) => { if (p.soft) p.life = Math.min(p.life, p.age + 1.5); });
+    }
+    propsWanted = want;
+    propMats.drop.color.copy(U.uLightCol.value);
+
+    for (let k = props.length - 1; k >= 0; k--) {
+      const p = props[k];
+      p.age += dt;
+      if (p.age <= p.life) p.update(p, dt, tt);
+      else p.group.visible = false;
+      for (let j = p.drops.length - 1; j >= 0; j--) {
+        const d = p.drops[j];
+        d.vy -= 9.8 * dt; d.life += dt;
+        d.m.position.x += d.vx * dt; d.m.position.y += d.vy * dt; d.m.position.z += d.vz * dt;
+        d.m.scale.setScalar(0.09 * Math.max(0, 1 - d.life / 1.6));
+        if (d.life > 1.6 || d.m.position.y < hAt(d.m.position.x, d.m.position.z, tt) - 0.3) {
+          scene.remove(d.m); p.drops.splice(j, 1);
+        }
+      }
+      if (p.age > p.life && !p.drops.length) {
+        scene.remove(p.group);
+        if (p.dispose) p.dispose();
+        props.splice(k, 1);
+      }
+    }
+  }
+
+  meta.innerHTML =
+    COUNT.toLocaleString('zh-CN') + ' 枚立方体 · 月高 ' + MOON_ELEV.toFixed(1) + '° · ' + WAVES.length + ' 组涌浪' +
+    '<br><span class="hint">每枚方块都有一首自己的曲子 · 指向让它浮起，左键锁定聆听</span><span class="hint-touch">每枚方块都有一首自己的曲子 · 轻点浮起，再点一次锁定聆听</span>';
+
+  // ================= Easter egg: the cat =================
+  // Three quick taps on the moon (main view) gather every cube into a sitting voxel cat on the water.
+  // One more tap on the moon, a click anywhere, or Esc sends them home. The cat is described as a union of
+  // simple shapes, sampled on the sea's own 1-unit grid; its surface cells are the visible cubes (several sea
+  // cubes may stack into one cell), and each cube sets off by the height of its cell, so the cat builds bottom-up.
+  let catTarget = 0, catBuilt = false, moonTaps = [];
+  const CAT_AT = new THREE.Vector3(0, 0, -40);    // where it sits: centre of its base on the water
+  const CAT_SCALE = 1.25;                          // design units → sea grid units (about 34 units tall)
+
+  function catShape(x, y, z) {
+    // returns a colour key if (x, y, z) in design units is inside the cat, else ''
+    const ell = (px, py, pz, cx, cy, cz, rx, ry, rz) => ((px - cx) / rx) ** 2 + ((py - cy) / ry) ** 2 + ((pz - cz) / rz) ** 2 <= 1;
+    const cap = (px, py, pz, a, b, r) => {             // capsule a→b with radius r
+      const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+      const t = Math.max(0, Math.min(1, ((px - a[0]) * abx + (py - a[1]) * aby + (pz - a[2]) * abz) / (abx * abx + aby * aby + abz * abz)));
+      const dx = px - (a[0] + abx * t), dy = py - (a[1] + aby * t), dz = pz - (a[2] + abz * t);
+      return dx * dx + dy * dy + dz * dz <= r * r;
+    };
+    const ax = Math.abs(x);
+    // eyes, nose, muzzle first so they win over the head
+    const eyeD = Math.hypot(ax - 2.4, y - 20.4, z - 7.4);
+    const head = ell(x, y, z, 0, 19.5, 2.5, 6.6, 5.8, 6.0);
+    if (head && eyeD < 1.35) return 'eye';
+    if (head && Math.hypot(x, y - 18.9, z - 8.4) < 0.95) return 'nose';
+    if (ell(x, y, z, 0, 17.8, 7.4, 2.7, 1.8, 1.6)) return 'cream';
+    if (head) return (z > 3 && y < 18.4 && ax < 3.6) ? 'cream' : ((Math.sin(y * 1.5) > 0.55 && z < 4) ? 'stripe' : 'ginger');
+    // ears: cones from a base on the head up to a point
+    for (const sx of [-1, 1]) {
+      const by = 22.6, ty = 28.6, t = (y - by) / (ty - by);
+      if (t >= 0 && t <= 1) {
+        const r = 3.0 * (1 - t), cx = sx * (3.5 + 0.9 * t);
+        if (((x - cx) / r) ** 2 + ((z - 2.2) / Math.max(0.6, r * 0.55)) ** 2 <= 1) return (z > 2.4 && r > 1.0 && ((x - cx) / (r - 0.6)) ** 2 < 1) ? 'pink' : 'ginger';
+      }
+    }
+    // front legs and paws
+    for (const sx of [-1, 1]) {
+      if (cap(x, y, z, [sx * 2.6, 0.9, 4.4], [sx * 2.4, 8.5, 4.0], 1.7)) return y < 2.2 ? 'cream' : 'ginger';
+    }
+    // tail curling round the front on the right
+    const tp = [[4.5, 1.0, -5.5], [8.6, 1.2, -3.0], [10.0, 1.4, 1.0], [9.0, 1.8, 4.8], [6.6, 2.0, 6.6]];
+    for (let i = 0; i + 1 < tp.length; i++) if (cap(x, y, z, tp[i], tp[i + 1], 1.5)) return i === tp.length - 2 ? 'stripe' : ((i % 2) ? 'stripe' : 'ginger');
+    // body: a sitting pear, wider at the bottom, cream chest
+    const rx = 7.2 + Math.max(0, 9 - y) * 0.22;
+    if (ell(x, y, z, 0, 8.6, 0, rx, 8.8, 6.4)) {
+      if (z > 3.2 && ax < 3.8 && y > 4 && y < 15.5) return 'cream';
+      return (Math.sin(y * 1.3 + ax * 0.25) > 0.6 && z < 2.5) ? 'stripe' : 'ginger';
+    }
+    return '';
+  }
+  const CAT_COL = {
+    ginger: new THREE.Color(0xd99a5b), stripe: new THREE.Color(0xa8662f), cream: new THREE.Color(0xf2dfc3),
+    pink: new THREE.Color(0xe8a3ad), nose: new THREE.Color(0xe07a8a), eye: new THREE.Color(0x1e3324)
+  };
+
+  function buildCat() {
+    if (catBuilt) return;
+    catBuilt = true;
+    const S = CAT_SCALE, cells = new Map(), key = (i, j, k) => i + ',' + j + ',' + k;
+    const I = Math.ceil(13 * S), J = Math.ceil(29.5 * S), K0 = Math.floor(-8 * S), K1 = Math.ceil(10.5 * S);
+    for (let j = 0; j <= J; j++) for (let i = -I; i <= I; i++) for (let k = K0; k <= K1; k++) {
+      const c = catShape(i / S, j / S, k / S);
+      if (c) cells.set(key(i, j, k), c);
+    }
+    // keep only the cells you can see: the ones with an empty neighbour
+    const surface = [];
+    cells.forEach((c, kk) => {
+      const [i, j, k] = kk.split(',').map(Number);
+      if (!cells.has(key(i + 1, j, k)) || !cells.has(key(i - 1, j, k)) || !cells.has(key(i, j + 1, k)) ||
+          !cells.has(key(i, j - 1, k)) || !cells.has(key(i, j, k + 1)) || !cells.has(key(i, j, k - 1))) {
+        surface.push({ x: CAT_AT.x + i, y: CAT_AT.y + j - 0.1, z: CAT_AT.z + k, c, h: j / J });
+      }
+    });
+    // Send cubes from each side of the sea to the same side of the cat: sort both by bearing around the cat
+    const bearing = (x, z) => Math.atan2(x - CAT_AT.x, z - CAT_AT.z);
+    surface.sort((a, b) => bearing(a.x, a.z) - bearing(b.x, b.z));
+    const order = Array.from({ length: COUNT }, (_, k) => k).sort((a, b) => bearing(cellX(a), cellZ(a)) - bearing(cellX(b), cellZ(b)));
+    const A = catAttr.array, C = catColAttr.array, n = surface.length;
+    order.forEach((idx, r) => {
+      const v = surface[Math.min(n - 1, Math.floor(r * n / COUNT))];
+      A[idx * 4] = v.x; A[idx * 4 + 1] = v.y; A[idx * 4 + 2] = v.z;
+      A[idx * 4 + 3] = Math.min(1, v.h * 0.88 + Math.random() * 0.12);   // bottom first, a little scatter
+      const col = CAT_COL[v.c];
+      C[idx * 3] = col.r; C[idx * 3 + 1] = col.g; C[idx * 3 + 2] = col.b;
+    });
+    catAttr.needsUpdate = true;
+    catColAttr.needsUpdate = true;
+  }
+
+  function moonTap() {
+    moonPulseAt = performance.now() / 1000;          // every tap: a ring from the moon, nothing more
+    if (catTarget > 0) { catTarget = 0; moonTaps = []; return; }
+    const now = performance.now();
+    moonTaps = moonTaps.filter((tm) => now - tm < 1600);
+    moonTaps.push(now);
+    if (moonTaps.length >= 3) {
+      moonTaps = [];
+      buildCat();
+      hovered = -1;
+      catTarget = 1;
+    }
+  }
+  function updateCat(dt) {
+    const u = U.uCat.value;
+    if (catTarget > 0 && u < 1) U.uCat.value = Math.min(1, u + dt / 4.5);
+    else if (catTarget === 0 && u > 0) U.uCat.value = Math.max(0, u - dt / 3.2);
+  }
+
+  // ---- Sizing ----
+  function resize() {
+    const w = stage.clientWidth || innerWidth;
+    const h = stage.clientHeight || innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.fov = w / h < 0.8 ? 62 : 45;
+    camera.updateProjectionMatrix();
+    U.uPR.value = renderer.getPixelRatio();
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // ---- Gentle parallax ----
+  let tx = 0, ty = 0, cx = 0, cy = 0;
+  addEventListener('pointermove', (ev) => {
+    tx = (ev.clientX / innerWidth) * 2 - 1;
+    ty = (ev.clientY / innerHeight) * 2 - 1;
+  }, { passive: true });
+
+  // ---- Loop ----
+  let playing = !reduceMotion;
+
+  // ---- Opening ----
+  // 0 → 5.2 s: the sea unfolds from the middle; 0.9 → 7.4 s: the moon rises from below the horizon to 12.4°;
+  // the camera eases in from a little higher and further back. Skipped when reduced motion is preferred.
+  const intro = { t: reduceMotion ? 99 : 0, dur: 5.2, moonAt: 0.9, moonDur: 6.5, camDur: 6.0, done: reduceMotion };
+  const MOON_EL0 = -5 * Math.PI / 180;
+  const easeOut3 = (u) => 1 - Math.pow(1 - Math.max(0, Math.min(1, u)), 3);
+  if (!intro.done) U.uIntro.value = 0;
+  requestAnimationFrame(() => document.getElementById('veil').classList.add('gone'));
+  // Replay on request (also when reduced motion is set: the viewer asked for it)
+  function replayIntro() {
+    if (locked >= 0) unlock();
+    hovered = -1;
+    const veil = document.getElementById('veil');
+    veil.style.transition = 'none';
+    veil.classList.remove('gone');
+    veil.style.display = '';
+    void veil.offsetWidth;                              // commit the black frame before fading again
+    veil.style.transition = '';
+    requestAnimationFrame(() => veil.classList.add('gone'));
+    intro.t = 0;
+    intro.done = false;
+    U.uIntro.value = 0;
+    if (!playing) setPlaying(true);
+  }
+  document.getElementById('replayBtn').addEventListener('click', replayIntro);
+
+  // ---- Closing ----
+  // 0 → 3.6 s: every cube flies back into the centre cube, farthest first; 3.6 → 4.6 s: the centre cube goes out;
+  // 3.2 → 7.5 s: the moon sets and its light fades with it; from 5.8 s: the night fades to black.
+  const outro = { on: false, pending: false, done: false, t: 0, veil: false };
+  let outroLight = 1;
+  // The sea's centre cube (cube centres sit on half-units in x), used by the opening and the closing
+  U.uIntroC.value.set(cellX(Math.round(zStart + 20) * COLS + Math.round((COLS - 1) / 2)), cellZ(Math.round(zStart + 20) * COLS));
+  function startOutro() {
+    if (outro.on || outro.done) return;
+    if (catTarget > 0 || U.uCat.value > 0) { catTarget = 0; outro.pending = true; return; }   // let the cat come apart first
+    if (locked >= 0) unlock();
+    if (!importPanel.hidden) setImportOpen(false);
+    hovered = -1;
+    if (!playing) setPlaying(true);
+    outro.on = true; outro.done = false; outro.t = 0; outro.veil = false;
+    document.body.classList.add('closing');
+  }
+  function updateOutro(dt) {
+    if (outro.pending && U.uCat.value === 0) { outro.pending = false; startOutro(); }
+    if (!outro.on) return;
+    outro.t += dt;
+    const tt = outro.t;
+    U.uOutro.value = Math.min(1, tt / 3.6);
+    U.uOutroCore.value = Math.max(0, Math.min(1, (tt - 3.6) / 1.0));
+    const m = Math.max(0, Math.min(1, (tt - 3.2) / 4.3));
+    const el = e + (MOON_EL0 - e) * m * m;                // slow to start, then sinking below the horizon
+    moonDir.set(0, Math.sin(el), -Math.cos(el));
+    U.uMoonDir.value.copy(moonDir);
+    moonLight.position.copy(moonDir).multiplyScalar(100);
+    outroLight = Math.max(0, Math.min(1, Math.sin(el) / Math.sin(e)));
+    if (tt > 5.8 && !outro.veil) { outro.veil = true; document.getElementById('veil').classList.remove('gone'); }
+    if (tt > 8.4) {
+      outro.on = false;
+      outro.done = true;
+      document.getElementById('veil').classList.add('ended');
+    }
+  }
+  function restartFromDark() {
+    outro.done = false;
+    U.uOutro.value = 0;
+    U.uOutroCore.value = 0;
+    outroLight = 1;
+    document.getElementById('veil').classList.remove('ended');
+    document.body.classList.remove('closing');
+    replayIntro();
+  }
+  document.getElementById('outroBtn').addEventListener('click', startOutro);
+  function updateIntro(dt) {
+    if (intro.done) return 0;
+    intro.t += dt;
+    U.uIntro.value = Math.min(1, intro.t / intro.dur);
+    const el = MOON_EL0 + (e - MOON_EL0) * easeOut3((intro.t - intro.moonAt) / intro.moonDur);
+    moonDir.set(0, Math.sin(el), -Math.cos(el));
+    U.uMoonDir.value.copy(moonDir);
+    moonLight.position.copy(moonDir).multiplyScalar(100);
+    const camLeft = 1 - easeOut3(intro.t / intro.camDur);
+    if (intro.t >= Math.max(intro.dur, intro.moonAt + intro.moonDur, intro.camDur)) {
+      intro.done = true;
+      U.uIntro.value = 1;
+    }
+    return camLeft;                                  // how much of the camera's approach is still to go
+  }
+  let t = 6.0;
+  let last = performance.now();
+  const look = new THREE.Vector3();
+  const widePos = new THREE.Vector3(), wideLook = new THREE.Vector3();
+  const closePos = new THREE.Vector3(), tmpF = new THREE.Vector3(), cornerPos = new THREE.Vector3();
+  let wasFocused = false;
+  const spotDir = new THREE.Vector3();
+  const RIM_DIR = new THREE.Vector3(-Math.sin(Math.atan2(0.9, 3.0)), 0.22, -Math.cos(Math.atan2(0.9, 3.0))).normalize();
+
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    if (playing) t += dt;
+    U.uTime.value = t;
+
+    cx += (tx - cx) * 0.03;
+    cy += (ty - cy) * 0.03;
+    const drift = Math.sin(t * 0.07) * 0.8;
+    widePos.set(camBase.x + cx * 3.0 + drift, camBase.y - cy * 1.2 + Math.sin(t * 0.31) * 0.15, camBase.z);
+    const camLeft = updateIntro(dt);
+    if (camLeft > 0) { widePos.y += camLeft * 3.5; widePos.z += camLeft * 12; }
+    wideLook.set(cx * 1.2 + drift * 0.5, 2.6, -40);
+    updateCat(dt);
+    updateOutro(dt);
+    if (U.uCat.value > 0) { const ce = Math.min(1, U.uCat.value); wideLook.y += ce * ce * (3 - 2 * ce) * 12; }
+
+    // Push in on the locked cube (and ease back out when released)
+    const step = dt / 1.7;
+    focusP = locked >= 0 ? Math.min(1, focusP + step) : Math.max(0, focusP - step);
+
+    // Sea view: after 10 s of listening in the close-up, or on request, pull back (slower, ~2.4 s)
+    if (locked >= 0 && !seaView && shownPhase === 'play' && playing && focusP >= 1) {
+      closeTimer += dt;
+      if (closeTimer >= SEA_AFTER) setSeaView(true);
+    }
+    const seaGoal = locked >= 0 && seaView ? 1 : 0;
+    seaP = seaGoal ? Math.min(1, seaP + dt / 2.4) : Math.max(0, seaP - dt / 1.7);
+    if (focusP > 0 && focusCell >= 0) {
+      const fx = cellX(focusCell), fz = cellZ(focusCell);
+      tmpF.set(fx, hAt(fx, fz, t) + lift[focusCell] * LIFT_H, fz);
+      if (!wasFocused) focusC.copy(tmpF); else focusC.lerp(tmpF, 1 - Math.exp(-dt * 4));
+      wasFocused = true;
+      // Low three-quarter view from the shore side, so the moon sits behind the cube
+      // While dragging, lean toward the neighbour the drag is heading for
+      const nx = drag.on && drag.moved ? Math.max(-1, Math.min(1, drag.dx / DRAG_STEP)) : 0;
+      const ny = drag.on && drag.moved ? Math.max(-1, Math.min(1, -drag.dy / DRAG_STEP)) : 0;
+      nudge.x += (nx - nudge.x) * (1 - Math.exp(-dt * 10));
+      nudge.y += (ny - nudge.y) * (1 - Math.exp(-dt * 10));
+      closePos.set(
+        focusC.x + 0.9 + cx * 1.4 + nudge.x * 0.55,
+        focusC.y + 0.7 - cy * 0.45 + nudge.y * 0.12,
+        focusC.z + 3.0 - nudge.y * 0.55
+      );
+      // Songs with lyrics: rise to the corner view (top, cover and credits all facing the camera)
+      const lw = holdCell === focusCell ? U.uHoldW.value : 0;
+      if (lw > 0) {
+        const ce = Math.cos(CORNER_EL);
+        cornerPos.set(
+          focusC.x + Math.sin(CORNER_AZ) * ce * CORNER_D + cx * 0.3 + nudge.x * 0.55,
+          focusC.y + Math.sin(CORNER_EL) * CORNER_D - cy * 0.15,
+          focusC.z + Math.cos(CORNER_AZ) * ce * CORNER_D - nudge.y * 0.55
+        );
+        closePos.lerp(cornerPos, lw);
+      }
+      const sm = (p) => p * p * p * (p * (p * 6 - 15) + 10);
+      // Sea view backs the camera out to the wide shot without releasing the cube
+      const ez = sm(focusP) * (1 - sm(seaP));
+      camera.position.lerpVectors(widePos, closePos, ez);
+      look.lerpVectors(wideLook, focusC, ez);
+    } else {
+      wasFocused = false;
+      focusCell = locked;
+      camera.position.copy(widePos);
+      look.copy(wideLook);
+    }
+    camera.lookAt(look);
+
+    // The beam descends once the camera has mostly arrived, and withdraws quickly on release
+    if (locked >= 0 && focusP > 0.6) spotP = Math.min(1, spotP + dt / 1.3);
+    else spotP = Math.max(0, spotP - dt / 0.6);
+    const sE = spotP * spotP * (3 - 2 * spotP);
+    const lightOn = Math.max(0, Math.min(1, (spotP - 0.45) / 0.55));
+    U.uSpot.value = sE;
+    beam.visible = sE > 0.001;
+    if (beam.visible) {
+      beam.position.copy(focusC).addScaledVector(beamDir, -0.7);
+      beamMat.uniforms.uReveal.value = sE * 1.1;
+      beamMat.uniforms.uIntensity.value = 0.35 + 0.65 * sE;
+    }
+    // In the corner view the light swings low behind the cube: a rim on its far edges,
+    // instead of flooding the lyric face from above
+    const hw = holdCell === focusCell ? U.uHoldW.value : 0;
+    spotDir.copy(beamDir).lerp(RIM_DIR, hw).normalize();
+    spot.intensity = 3.4 * lightOn * lightOn * (1 - 0.3 * hw);
+    spot.position.copy(focusC).addScaledVector(spotDir, 30);
+    spot.target.position.copy(focusC);
+    spot.target.updateMatrixWorld();
+    moonLight.intensity = 0.95 * (1 - 0.35 * sE) * (1 - 0.3 * moonPhase) * outroLight;
+    hemi.intensity = 0.75 * (1 - 0.4 * sE);
+
+    sky.position.copy(camera.position);
+    stars.position.copy(camera.position);
+    meteors.position.copy(camera.position);
+    updateSky(playing ? dt : 0);
+
+    camera.updateMatrixWorld();
+    updateLift(t, dt);
+
+    if (focusCell >= 0) U.uFocusPos.value.set(cellX(focusCell), cellZ(focusCell));
+    updateMusic(dt);
+    updateLyrics(playing ? dt : 0, t);
+    updatePlayer(dt);
+    updateChrome(dt);
+    U.uEdgeOn.value += ((locked < 0 ? 1 : 0) - U.uEdgeOn.value) * (1 - Math.exp(-dt * 6));
+    // Song colours show while nothing is playing; once a song actually plays, every cube returns to the scene tone
+    const nowPlaying = !!(session && playing && !musicPaused && session.elapsed() >= 0 && !(session.kind === 'track' && (!session.started || session.failed)));
+    U.uGreyOn.value += ((imported && !nowPlaying ? 1 : 0) - U.uGreyOn.value) * (1 - Math.exp(-dt * 2.5));
+    U.uFocusEdge.value *= Math.exp(-dt * 2.2);          // about a second to fade on the confirmed cube
+
+    // Moon control: hover rim and mark, waning while the music rests, a ring on each tap
+    const hov = moonActive() && pointerIn && !drag.on && overMoon(px, py);
+    if (hov !== moonHoverOn) {
+      moonHoverOn = hov;
+      document.body.style.cursor = hov ? 'pointer' : (locked >= 0 ? 'grab' : '');
+    }
+    moonHover += ((hov ? 1 : 0) - moonHover) * (1 - Math.exp(-dt * 8));
+    moonPhase += ((musicPaused && locked >= 0 ? 1 : 0) - moonPhase) * (1 - Math.exp(-dt * 2.6));
+    U.uMoonHover.value = moonHover;
+    U.uMoonPhase.value = moonPhase;
+    U.uMoonGlyph.value = musicPaused ? 1 : 0;
+    U.uMoonPulse.value = Math.min(30, performance.now() / 1000 - moonPulseAt);
+
+    updateProps(playing ? dt : 0, t);
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  function setPlaying(p) {
+    playing = p;
+    toggle.textContent = p ? '暂停' : '播放';
+    toggle.setAttribute('aria-pressed', String(!p));
+    // Pausing the scene also holds the music (and the ripples, which run on audio time)
+    syncAudio();
+  }
+  toggle.addEventListener('click', () => setPlaying(!playing));
+  setPlaying(playing);
+
+  // ---- Sea-view player: progress, seek, previous / play-pause / next ----
+  const player = document.getElementById('player');
+  const plTrack = document.getElementById('plTrack');
+  const plFill = document.getElementById('plFill');
+  const plKnob = document.getElementById('plKnob');
+  const plCur = document.getElementById('plCur');
+  const plDur = document.getElementById('plDur');
+  const plPrev = document.getElementById('plPrev');
+  const plNext = document.getElementById('plNext');
+  let plOn = false, plDrag = null, plShownCur = '', plShownDur = '', plAccentT = 0, plLinger = 0, plTouch = 0;
+  // Touch screens have no hover: any tap in sea view brings the controls out for a few seconds
+  addEventListener('pointerdown', (ev) => {
+    if (ev.pointerType === 'touch' && seaView && locked >= 0) plTouch = 4;
+  }, true);
+  const fmtTime = (x) => { x = Math.max(0, Math.floor(x)); return Math.floor(x / 60) + ':' + String(x % 60).padStart(2, '0'); };
+  // Tracks run in reading order across the sea: next = the cube to the right, wrapping to the next row
+  // On cubes from your playlist, next / previous follow the playlist order
+  const goTrack = (d) => {
+    if (locked < 0) return;
+    const k = trackOfCube.get(locked);
+    if (k !== undefined && imported) switchTo(cubeOfTrack[(k + d + cubeOfTrack.length) % cubeOfTrack.length]);
+    else switchTo((locked + d + COUNT) % COUNT);
+  };
+
+  plNext.addEventListener('click', () => goTrack(1));
+  plPrev.addEventListener('click', () => {
+    // Past the first few seconds, "previous" restarts the song; near the start it goes back a cube
+    const S = session;
+    if (S && actx && S.elapsed() > 3) seekTo(0); else goTrack(-1);
+  });
+  const trackFrac = (ev) => {
+    const r = plTrack.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width));
+  };
+  plTrack.addEventListener('pointerdown', (ev) => {
+    const S = session;
+    if (!S || !actx || actx.currentTime < S.startAt) return;
+    plDrag = trackFrac(ev);
+    plTrack.setPointerCapture(ev.pointerId);
+    plTrack.classList.add('drag');
+  });
+  plTrack.addEventListener('pointermove', (ev) => { if (plDrag !== null) plDrag = trackFrac(ev); });
+  plTrack.addEventListener('pointerup', () => {
+    if (plDrag === null) return;
+    if (session) seekTo(plDrag * session.dur);
+    plDrag = null;
+    plTrack.classList.remove('drag');
+  });
+  plTrack.addEventListener('pointercancel', () => { plDrag = null; plTrack.classList.remove('drag'); });
+  plTrack.addEventListener('keydown', (ev) => {
+    const S = session;
+    if (!S || !actx) return;
+    const now = S.elapsed();
+    if (ev.key === 'ArrowRight') { seekTo(now + 5); ev.preventDefault(); }
+    if (ev.key === 'ArrowLeft') { seekTo(now - 5); ev.preventDefault(); }
+  });
+
+  function updatePlayer(dt) {
+    const S = session;
+    // A finished song hands over to the next cube, like a playlist
+    if (S && S.kind !== 'track' && actx && locked >= 0 && actx.currentTime >= S.startAt + S.dur) { goTrack(1); return; }
+    // The controls belong to sea view, and only come out when the pointer is near the moon
+    const base = !!(S && locked >= 0 && seaView && seaP > 0.6);
+    let reveal = false;
+    if (base) {
+      // Gather the controls around the moon wherever it sits on screen
+      moonV.copy(camera.position).addScaledVector(moonDir, 400).project(camera);
+      const mx = (moonV.x + 1) / 2 * innerWidth, my = (1 - moonV.y) / 2 * innerHeight;
+      const rPx = MOON_R / Math.tan(camera.fov * Math.PI / 360) * innerHeight / 2;
+      player.style.transform = 'translate(' + mx.toFixed(1) + 'px,' + my.toFixed(1) + 'px)';
+      player.style.setProperty('--mr', rPx.toFixed(1) + 'px');
+      // The zone around the moon that covers the buttons and the progress line; a little larger once
+      // shown, so the controls don't flicker at its edge
+      const pad = plOn ? 36 : 0;
+      const halfW = Math.max(170, rPx + 110) + pad;
+      const near = pointerIn && Math.abs(px - mx) < halfW && py > my - rPx - 60 - pad && py < my + rPx + 80 + pad;
+      if (near || plDrag !== null || player.contains(document.activeElement)) plLinger = 0.8;
+      else plLinger -= dt;
+      plTouch -= dt;
+      reveal = plLinger > 0 || plTouch > 0;
+    } else {
+      plLinger = 0;
+      plTouch = 0;
+    }
+    const show = base && reveal;
+    if (show !== plOn) {
+      plOn = show;
+      player.classList.toggle('on', show);
+      player.setAttribute('aria-hidden', String(!show));
+      [plPrev, plNext, plTrack].forEach((el) => { el.tabIndex = show ? 0 : -1; });
+    }
+    if (!S || !actx) return;
+    const counting = actx.currentTime < S.startAt;
+    const el = Math.max(0, Math.min(S.dur, S.elapsed()));
+    const f = plDrag !== null ? plDrag : el / S.dur;
+    plFill.style.width = (f * 100).toFixed(2) + '%';
+    plKnob.style.left = (f * 100).toFixed(2) + '%';
+    plTrack.classList.toggle('idle', counting);
+    const cur = fmtTime(f * S.dur), du = fmtTime(S.dur);
+    if (cur !== plShownCur) {
+      plShownCur = cur;
+      plCur.textContent = cur;
+      plTrack.setAttribute('aria-valuenow', String(Math.floor(f * S.dur)));
+      plTrack.setAttribute('aria-valuetext', cur + ' / ' + du);
+    }
+    if (du !== plShownDur) { plShownDur = du; plDur.textContent = du; plTrack.setAttribute('aria-valuemax', String(Math.floor(S.dur))); }
+    // The progress line takes the song's light colour, lifted toward white so they stay bright
+    plAccentT -= dt;
+    if (plAccentT <= 0) {
+      plAccentT = 0.2;
+      const c = U.uLightCol.value;
+      const ch = (v) => Math.min(255, Math.round((v * 0.8 + 0.2) * 255));
+      player.style.setProperty('--accent', 'rgb(' + ch(c.r) + ',' + ch(c.g) + ',' + ch(c.b) + ')');
+    }
+  }
+
+  // ---- Fullscreen: the button, or the F key ----
+  const fsBtn = document.getElementById('fsBtn');
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement || null;
+  const fsCan = !!(document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen) &&
+    (document.fullscreenEnabled !== false && document.webkitFullscreenEnabled !== false);
+  // Where the page may not go fullscreen (an app's embedded view, iPhone), the same button gives an
+  // immersive view instead: every control steps away except the white point
+  let immersive = false, fsNoteTimer = 0;
+  const fsNote = document.getElementById('fsNote');
+  function note(text) {
+    fsNote.textContent = text;
+    fsNote.classList.add('show');
+    clearTimeout(fsNoteTimer);
+    fsNoteTimer = setTimeout(() => fsNote.classList.remove('show'), 2800);
+  }
+  function showFs() {
+    const on = !!fsEl();
+    if (on && immersive) setImmersive(false);
+    fsBtn.textContent = on ? '退出全屏' : immersive ? '退出沉浸' : '全屏';
+    fsBtn.setAttribute('aria-pressed', String(on || immersive));
+    fsBtn.title = on ? '退出全屏（F 或 Esc）' : immersive ? '退出沉浸（F）' : '全屏（F）';
+  }
+  function setImmersive(v) {
+    immersive = v;
+    document.body.classList.toggle('immersive', v);
+    showFs();
+  }
+  async function toggleFullscreen() {
+    if (immersive) { setImmersive(false); return; }
+    if (fsEl()) {
+      try { await (document.exitFullscreen ? document.exitFullscreen() : document.webkitExitFullscreen()); } catch (err) { /* already out */ }
+      return;
+    }
+    if (fsCan) {
+      try {
+        const el = document.documentElement;
+        const r = el.requestFullscreen ? el.requestFullscreen({ navigationUI: 'hide' }) : el.webkitRequestFullscreen();
+        if (r && r.then) await r;
+        return;
+      } catch (err) { /* refused: fall through to the immersive view */ }
+    }
+    setImmersive(true);
+    note('此处不支持全屏，已进入沉浸模式（再按 F 退出）');
+  }
+  fsBtn.addEventListener('click', toggleFullscreen);
+  document.addEventListener('fullscreenchange', showFs);
+  document.addEventListener('webkitfullscreenchange', showFs);
+  addEventListener('keydown', (ev) => {
+    if ((ev.key === 'f' || ev.key === 'F') && !ev.ctrlKey && !ev.metaKey && !ev.altKey &&
+        !(ev.target && ev.target.closest && ev.target.closest('input, textarea'))) toggleFullscreen();
+  });
+
+  // ---- The white point: a line of light that carries the extra controls ----
+  const moreEl = document.getElementById('more');
+  const moreDot = document.getElementById('moreDot');
+  const moreMenu = document.getElementById('moreMenu');
+  let moreOpen = false;
+  function setMoreOpen(open, keepFocus) {
+    if (open === moreOpen) return;
+    moreOpen = open;
+    const items = [...moreMenu.querySelectorAll(':scope > button')].filter((b) => !b.hidden);
+    const STEP = 40, FIRST = 22;
+    items.forEach((b, i) => {
+      b.style.top = (FIRST + i * STEP - 17) + 'px';
+      // open: they appear down the line as it grows; close: the lowest goes first
+      b.style.transitionDelay = open ? (0.18 + i * 0.08) + 's' : ((items.length - 1 - i) * 0.04) + 's';
+      b.tabIndex = open ? 0 : -1;
+    });
+    moreMenu.style.setProperty('--len', (FIRST + (items.length - 1) * STEP + 26) + 'px');
+    moreEl.classList.toggle('open', open);
+    moreDot.setAttribute('aria-expanded', String(open));
+    if (open && !importPanel.hidden) setImportOpen(false);
+    if (!open && !keepFocus && moreMenu.contains(document.activeElement)) moreDot.focus();
+  }
+  moreDot.addEventListener('click', () => setMoreOpen(!moreOpen));
+  // choosing an item, tapping elsewhere, or Esc folds the line back up
+  moreMenu.addEventListener('click', (ev) => { if (ev.target.closest('button')) setMoreOpen(false, true); });
+  addEventListener('pointerdown', (ev) => { if (moreOpen && !moreEl.contains(ev.target)) setMoreOpen(false, true); }, true);
+  addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && moreOpen) { ev.stopImmediatePropagation(); setMoreOpen(false); }
+  }, true);
+
+  // ---- Controls follow the moonlight, and step back while you are only watching ----
+  let chromeT = 0, idleFor = 0, moonRgbShown = '';
+  const markActive = () => { idleFor = 0; if (document.body.classList.contains('idle')) document.body.classList.remove('idle'); };
+  ['pointermove', 'pointerdown', 'keydown', 'wheel'].forEach((ev) => addEventListener(ev, markActive, { passive: true }));
+  function updateChrome(dt) {
+    chromeT -= dt;
+    if (chromeT <= 0) {
+      chromeT = 0.25;
+      // the light colour, lifted toward white so the words stay readable on any song's night
+      const c = U.uLightCol.value;
+      const ch = (v) => Math.round(Math.min(1, v * 0.55 + 0.45) * 255);
+      const v = ch(c.r) + ', ' + ch(c.g) + ', ' + ch(c.b);
+      if (v !== moonRgbShown) { moonRgbShown = v; document.documentElement.style.setProperty('--moon-rgb', v); }
+    }
+    idleFor += dt;
+    const panelOpen = !document.getElementById('importPanel').hidden || moreOpen;
+    if (idleFor > 3.5 && !panelOpen && !document.body.classList.contains('idle')) document.body.classList.add('idle');
+  }
+
+  // ---- Local music import (works offline, no backend) ----
+  // Pick files or a folder, or drop them on the page. Title / artist / album / cover / lyrics are read
+  // from the files themselves (ID3 in mp3, Vorbis comments in flac); a same-named .lrc file supplies
+  // timed lyrics, and cover.jpg / folder.jpg in the same folder supplies a cover. Imported songs are kept
+  // in this browser (IndexedDB) so they are still on the sea next time.
+  const importStatus = document.getElementById('importStatus');
+  const importBody = document.getElementById('importBody');
+  const AUDIO_EXT = /\.(mp3|flac|m4a|aac|ogg|oga|opus|wav|webm)$/i;
+  const LRC_EXT = /\.lrc$/i;
+  const IMG_EXT = /\.(jpe?g|png|webp|gif|bmp)$/i;
+  const COVER_NAME = /^(cover|folder|front|album|albumart)[^/]*\.(jpe?g|png|webp)$/i;
+  const pathOf = (f) => f.relPath || f.webkitRelativePath || f.name;
+  const baseOf = (path) => path.replace(/\.[^./]+$/, '').toLowerCase();
+  const dirOf = (path) => { const i = path.lastIndexOf('/'); return i < 0 ? '' : path.slice(0, i); };
+  let remember = true, busy = false;
+  try { remember = localStorage.getItem('moonCubeSea.remember') !== '0'; } catch (err) { /* default on */ }
+
+  function h(tag, props, ...kids) {
+    const n = document.createElement(tag);
+    Object.assign(n, props || {});
+    kids.flat().forEach((k) => n.append(k));
+    return n;
+  }
+  const setImportStatus = (text) => { importStatus.textContent = text; };
+
+  // ---------- text decoding (Chinese tags are often GBK even when marked Latin-1) ----------
+  const tryDecode = (label, bytes, fatal) => { try { return new TextDecoder(label, { fatal }).decode(bytes); } catch (err) { return null; } };
+  function decodeLoose(bytes) {
+    if (bytes.every((b) => b < 0x80)) return tryDecode('latin1', bytes, false);
+    return tryDecode('utf-8', bytes, true) ?? tryDecode('gbk', bytes, true) ?? tryDecode('latin1', bytes, false);
+  }
+  function decodeText(bytes) {
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return tryDecode('utf-8', bytes.subarray(3), false);
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) return tryDecode('utf-16le', bytes.subarray(2), false);
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) return tryDecode('utf-16be', bytes.subarray(2), false);
+    return decodeLoose(bytes);
+  }
+
+  // ---------- LRC ----------
+  function parseLRC(text) {
+    const out = [];
+    let offset = 0;
+    const off = /\[offset:\s*([+-]?\d+)\]/i.exec(text);
+    if (off) offset = parseInt(off[1], 10) / 1000;
+    text.split(/\r?\n/).forEach((line) => {
+      const stamps = [];
+      const re = /\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/g;
+      let m, last = 0;
+      while ((m = re.exec(line))) { stamps.push(parseInt(m[1], 10) * 60 + parseFloat(m[2].replace(':', '.'))); last = re.lastIndex; }
+      const words = line.slice(last).replace(/<\d+:\d+(?:\.\d+)?>/g, '').trim();   // drop per-word stamps
+      if (stamps.length && words) stamps.forEach((t) => out.push({ t: Math.max(0, t - offset), text: words }));
+    });
+    return out.sort((a, b) => a.t - b.t);
+  }
+
+  // ---------- ID3v2 (mp3) ----------
+  const be32 = (b, p) => ((b[p] << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3]) >>> 0;
+  const syncsafe = (b, p) => ((b[p] & 0x7f) << 21) | ((b[p + 1] & 0x7f) << 14) | ((b[p + 2] & 0x7f) << 7) | (b[p + 3] & 0x7f);
+  function decodeEnc(bytes, enc) {
+    if (enc === 1) {
+      if (bytes[0] === 0xfe && bytes[1] === 0xff) return tryDecode('utf-16be', bytes.subarray(2), false);
+      if (bytes[0] === 0xff && bytes[1] === 0xfe) return tryDecode('utf-16le', bytes.subarray(2), false);
+      return tryDecode('utf-16le', bytes, false);
+    }
+    if (enc === 2) return tryDecode('utf-16be', bytes, false);
+    if (enc === 3) return tryDecode('utf-8', bytes, false);
+    return decodeLoose(bytes);
+  }
+  // End of a null-terminated string in the given encoding (two zero bytes for UTF-16)
+  function termEnd(b, from, enc) {
+    if (enc === 1 || enc === 2) {
+      for (let i = from; i + 1 < b.length; i += 2) if (b[i] === 0 && b[i + 1] === 0) return i;
+      return b.length;
+    }
+    const i = b.indexOf(0, from);
+    return i < 0 ? b.length : i;
+  }
+  const cleanTag = (t) => (t || '').replace(/\0/g, '').trim();
+  async function parseID3(file, head) {
+    const ver = head[3], flags = head[5];
+    const size = syncsafe(head, 6);
+    const b = new Uint8Array(await file.slice(10, 10 + Math.min(size, 24 * 1024 * 1024)).arrayBuffer());
+    const out = {};
+    let p = 0, cover = null;
+    if ((flags & 0x40) && ver >= 3) p = ver === 4 ? syncsafe(b, 0) : be32(b, 0) + 4;   // skip extended header
+    const idLen = ver === 2 ? 3 : 4, hdr = ver === 2 ? 6 : 10;
+    while (p + hdr <= b.length) {
+      const id = String.fromCharCode(...b.subarray(p, p + idLen));
+      if (!/^[A-Z0-9]+$/.test(id)) break;
+      const fsize = ver === 2 ? (b[p + 3] << 16) | (b[p + 4] << 8) | b[p + 5] : ver === 4 ? syncsafe(b, p + 4) : be32(b, p + 4);
+      if (fsize <= 0 || p + hdr + fsize > b.length) break;
+      const f = b.subarray(p + hdr, p + hdr + fsize);
+      p += hdr + fsize;
+      const enc = f[0];
+      if (id === 'TIT2' || id === 'TT2') out.title = cleanTag(decodeEnc(f.subarray(1), enc));
+      else if (id === 'TPE1' || id === 'TP1') out.artist = cleanTag(decodeEnc(f.subarray(1), enc)).replace(/\0/g, ' / ');
+      else if (id === 'TALB' || id === 'TAL') out.album = cleanTag(decodeEnc(f.subarray(1), enc));
+      else if (id === 'USLT' || id === 'ULT') {
+        const e = termEnd(f, 4, enc);
+        out.lyrics = decodeEnc(f.subarray(e + (enc === 1 || enc === 2 ? 2 : 1)), enc);
+      } else if (id === 'APIC' || id === 'PIC') {
+        let mime, q;
+        if (id === 'PIC') { const fmt = String.fromCharCode(f[1], f[2], f[3]).toLowerCase(); mime = fmt === 'png' ? 'image/png' : 'image/jpeg'; q = 4; }
+        else { const me = f.indexOf(0, 1); mime = String.fromCharCode(...f.subarray(1, me)) || 'image/jpeg'; q = me + 1; }
+        const ptype = f[q];
+        const de = termEnd(f, q + 1, enc);
+        const data = f.subarray(de + (enc === 1 || enc === 2 ? 2 : 1));
+        if (data.length > 100 && (!cover || ptype === 3)) cover = new Blob([data], { type: mime.includes('/') ? mime : 'image/' + mime });
+      }
+    }
+    out.cover = cover;
+    return out;
+  }
+
+  // ---------- FLAC (Vorbis comments + PICTURE) ----------
+  async function parseFLAC(file) {
+    const out = {};
+    let pos = 4;
+    for (let guard = 0; guard < 64 && pos + 4 <= file.size; guard++) {
+      const hd = new Uint8Array(await file.slice(pos, pos + 4).arrayBuffer());
+      const last = hd[0] & 0x80, type = hd[0] & 0x7f, len = (hd[1] << 16) | (hd[2] << 8) | hd[3];
+      pos += 4;
+      if (type === 4 || type === 6) {
+        const b = new Uint8Array(await file.slice(pos, pos + len).arrayBuffer());
+        const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        if (type === 4) {
+          let q = 4 + dv.getUint32(0, true);
+          const count = dv.getUint32(q, true); q += 4;
+          for (let i = 0; i < count && q + 4 <= b.length; i++) {
+            const l = dv.getUint32(q, true); q += 4;
+            const kv = tryDecode('utf-8', b.subarray(q, q + l), false) || ''; q += l;
+            const eq = kv.indexOf('=');
+            if (eq < 0) continue;
+            const key = kv.slice(0, eq).toUpperCase(), val = kv.slice(eq + 1).trim();
+            if (key === 'TITLE' && !out.title) out.title = val;
+            else if (key === 'ARTIST') out.artist = out.artist ? out.artist + ' / ' + val : val;
+            else if (key === 'ALBUM' && !out.album) out.album = val;
+            else if ((key === 'LYRICS' || key === 'UNSYNCEDLYRICS') && !out.lyrics) out.lyrics = val;
+          }
+        } else {
+          const ptype = dv.getUint32(0, false);
+          let q = 4;
+          const ml = dv.getUint32(q, false); q += 4;
+          const mime = String.fromCharCode(...b.subarray(q, q + ml)); q += ml;
+          const dl = dv.getUint32(q, false); q += 4 + dl + 16;
+          const n = dv.getUint32(q, false); q += 4;
+          if (!out.cover || ptype === 3) out.cover = new Blob([b.subarray(q, q + n)], { type: mime || 'image/jpeg' });
+        }
+      }
+      pos += len;
+      if (last) break;
+    }
+    return out;
+  }
+
+  async function readTags(file) {
+    try {
+      const head = new Uint8Array(await file.slice(0, 10).arrayBuffer());
+      if (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) return await parseID3(file, head);   // "ID3"
+      if (head[0] === 0x66 && head[1] === 0x4c && head[2] === 0x61 && head[3] === 0x43) return await parseFLAC(file); // "fLaC"
+    } catch (err) { /* unreadable tags: fall back to the file name */ }
+    return {};
+  }
+  // "01. 歌手 - 歌名.mp3" → { artist, title }
+  function fromFileName(name) {
+    const base = name.replace(/\.[^.]+$/, '').replace(/^\s*\d{1,3}\s*[.\-_ ]\s*/, '').trim();
+    const m = /^(.+?)\s+-\s+(.+)$/.exec(base);
+    return m ? { artist: m[1].trim(), title: m[2].trim() } : { artist: '', title: base };
+  }
+
+  // ---------- library in IndexedDB ----------
+  const DB_NAME = 'moonCubeSea', STORE = 'library';
+  function openDB() {
+    return new Promise((resolve, reject) => {
+      const rq = indexedDB.open(DB_NAME, 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore(STORE);
+      rq.onsuccess = () => resolve(rq.result);
+      rq.onerror = () => reject(rq.error);
+    });
+  }
+  const txDone = (tx) => new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error); });
+  const reqP = (rq) => new Promise((resolve, reject) => { rq.onsuccess = () => resolve(rq.result); rq.onerror = () => reject(rq.error); });
+  async function saveLibrary(data) {
+    const db = await openDB();
+    try {
+      let tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).clear();
+      await txDone(tx);
+      // one song per write keeps each transaction small
+      for (let k = 0; k < data.tracks.length; k++) {
+        const t = data.tracks[k];
+        tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).put({ title: t.title, artist: t.artist, album: t.album, lrc: t.lrc, plain: t.plain, duration: t.duration || 0, audio: t.blob, cover: t.coverBlob || null }, 'song:' + k);
+        await txDone(tx);
+        if (k % 10 === 0) setImportStatus('正在保存到浏览器 ' + (k + 1) + ' / ' + data.tracks.length + ' 首…');
+      }
+      tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put({ name: data.name, count: data.tracks.length }, 'meta');
+      await txDone(tx);
+    } finally { db.close(); }
+  }
+  async function clearLibrary() {
+    const db = await openDB();
+    try { const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).clear(); await txDone(tx); } finally { db.close(); }
+  }
+  async function loadLibrary() {
+    const db = await openDB();
+    try {
+      const st = db.transaction(STORE, 'readonly').objectStore(STORE);
+      const meta = await reqP(st.get('meta'));
+      if (!meta || !meta.count) return null;
+      const tracks = [];
+      for (let k = 0; k < meta.count; k++) {
+        const r = await reqP(db.transaction(STORE, 'readonly').objectStore(STORE).get('song:' + k));
+        if (r && r.audio) tracks.push({ title: r.title, artist: r.artist, album: r.album, lrc: r.lrc, plain: r.plain, duration: r.duration, blob: r.audio, coverBlob: r.cover });
+      }
+      return tracks.length ? { name: meta.name, tracks } : null;
+    } finally { db.close(); }
+  }
+
+  // ---------- putting songs on the sea ----------
+  function releaseURLs(data) {
+    if (!data) return;
+    data.tracks.forEach((t) => { if (t.url) URL.revokeObjectURL(t.url); if (t.coverUrl) URL.revokeObjectURL(t.coverUrl); });
+  }
+  function showOnSea(data) {
+    data.tracks.forEach((t) => {
+      t.url = URL.createObjectURL(t.blob);
+      t.coverUrl = t.coverBlob ? URL.createObjectURL(t.coverBlob) : '';
+    });
+    if (locked >= 0 && trackOfCube.has(locked)) unlock();
+    releaseURLs(imported);
+    placeTracks(data);
+  }
+
+  async function importFiles(files, label) {
+    if (busy) return;
+    const audio = files.filter((f) => f.size > 0 && AUDIO_EXT.test(f.name))
+      .sort((a, b) => pathOf(a).localeCompare(pathOf(b), 'zh-CN', { numeric: true }));
+    if (!audio.length) { setImportStatus('没有找到音乐文件。支持 mp3、flac、m4a、ogg、wav 等格式。'); return; }
+    busy = true;
+    renderImport();
+    try {
+      const lrcByPath = new Map(), lrcByName = new Map(), imgByPath = new Map(), dirCover = new Map();
+      files.forEach((f) => {
+        const pth = pathOf(f);
+        if (LRC_EXT.test(f.name)) { lrcByPath.set(baseOf(pth), f); lrcByName.set(baseOf(f.name), f); }
+        else if (IMG_EXT.test(f.name)) {
+          imgByPath.set(baseOf(pth), f);
+          const d = dirOf(pth);
+          if (COVER_NAME.test(f.name) || !dirCover.has(d)) dirCover.set(d, f);
+        }
+      });
+      const tracks = [];
+      for (let i = 0; i < audio.length && tracks.length < MAX_TRACKS; i++) {
+        const f = audio[i], pth = pathOf(f);
+        if (i % 4 === 0) setImportStatus('正在读取 ' + (i + 1) + ' / ' + audio.length + ' 首…');
+        const tags = await readTags(f);
+        const fb = fromFileName(f.name);
+        let lrc = null, plain = null;
+        const lf = lrcByPath.get(baseOf(pth)) || lrcByName.get(baseOf(f.name));
+        const lyricText = lf ? decodeText(new Uint8Array(await lf.arrayBuffer())) : tags.lyrics;
+        if (lyricText) {
+          const timed = parseLRC(lyricText);
+          if (timed.length) lrc = timed;
+          else plain = lyricText.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+        }
+        tracks.push({
+          title: tags.title || fb.title, artist: tags.artist || fb.artist, album: tags.album || '',
+          blob: f, coverBlob: tags.cover || imgByPath.get(baseOf(pth)) || dirCover.get(dirOf(pth)) || null,
+          lrc, plain, duration: 0
+        });
+      }
+      const data = { name: label, tracks };
+      showOnSea(data);
+      let note = '';
+      if (remember) {
+        try { await saveLibrary(data); note = '，已保存在这个浏览器里'; }
+        catch (err) { note = '。这些歌太大，浏览器没能保存，下次打开需要重新导入'; }
+      } else {
+        clearLibrary().catch(() => {});
+      }
+      const withLyrics = tracks.filter((t) => t.lrc || t.plain).length;
+      setImportStatus('已导入 ' + tracks.length + ' 首（' + withLyrics + ' 首有歌词），放在镜头前方的海面上' + note);
+    } finally {
+      busy = false;
+      renderImport(true);
+    }
+  }
+
+  // ---------- panel ----------
+  const pickFiles = h('input', { type: 'file', multiple: true, accept: 'audio/*,.mp3,.flac,.m4a,.aac,.ogg,.oga,.opus,.wav,.webm,.lrc,image/*', hidden: true });
+  const pickDir = h('input', { type: 'file', multiple: true, hidden: true });
+  pickDir.setAttribute('webkitdirectory', '');
+  pickFiles.addEventListener('change', () => { const fs = [...pickFiles.files]; pickFiles.value = ''; importFiles(fs, '本地音乐'); });
+  pickDir.addEventListener('change', () => {
+    const fs = [...pickDir.files]; pickDir.value = '';
+    const top = fs.length ? (fs[0].webkitRelativePath || '').split('/')[0] : '';
+    importFiles(fs, top || '本地文件夹');
+  });
+  document.body.append(pickFiles, pickDir);
+
+  function renderImport(keepStatus) {
+    importBody.replaceChildren();
+    if (!keepStatus) setImportStatus(imported ? '海面上有 ' + cubeOfTrack.length + ' 首你的歌' : '把电脑里的音乐放到海面上');
+    const rememberBox = h('input', { type: 'checkbox', id: 'impRemember', checked: remember, disabled: busy,
+      onchange: () => { remember = rememberBox.checked; try { localStorage.setItem('moonCubeSea.remember', remember ? '1' : '0'); } catch (err) { /* ignore */ } } });
+    importBody.append(
+      h('div', { className: 'imp-row' },
+        h('button', { className: 'imp-btn', type: 'button', textContent: '选择音乐文件', disabled: busy, onclick: () => pickFiles.click() }),
+        h('button', { className: 'imp-btn', type: 'button', textContent: '选择整个文件夹', disabled: busy, onclick: () => pickDir.click() })),
+      h('p', {}, '也可以把文件或文件夹直接拖到页面上。'),
+      h('p', { className: 'imp-small' }, '歌词：同名的 .lrc 文件，或歌曲里内嵌的歌词。封面：歌曲里内嵌的图片，或同一文件夹里的 cover.jpg、folder.jpg。'),
+      h('label', { className: 'imp-check', htmlFor: 'impRemember' }, rememberBox, ' 记住这些歌，下次打开不用重新导入'));
+    if (imported) {
+      importBody.append(h('div', { className: 'imp-current' },
+        h('p', {}, '海面上：' + imported.name + ' · ' + cubeOfTrack.length + ' 首'),
+        h('div', { className: 'imp-row' },
+          h('button', { className: 'imp-btn', type: 'button', textContent: '清除导入', disabled: busy, onclick: () => {
+            if (locked >= 0 && trackOfCube.has(locked)) unlock();
+            releaseURLs(imported);
+            placeTracks(null);
+            clearLibrary().catch(() => {});
+            renderImport();
+          } }))));
+    }
+  }
+
+  // ---------- drag and drop anywhere on the page ----------
+  const dropHint = h('div', { className: 'drop-hint', hidden: true }, h('p', {}, '松开，把音乐放到海面上'));
+  document.body.append(dropHint);
+  let dragDepth = 0;
+  const hasFiles = (ev) => ev.dataTransfer && [...ev.dataTransfer.types].includes('Files');
+  addEventListener('dragenter', (ev) => { if (!hasFiles(ev)) return; ev.preventDefault(); dragDepth++; dropHint.hidden = false; });
+  addEventListener('dragover', (ev) => { if (!hasFiles(ev)) return; ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; });
+  addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dropHint.hidden = true; });
+  addEventListener('drop', async (ev) => {
+    if (!hasFiles(ev)) return;
+    ev.preventDefault();
+    dragDepth = 0;
+    dropHint.hidden = true;
+    const items = [...ev.dataTransfer.items].filter((it) => it.kind === 'file');
+    const entries = items.map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null)).filter(Boolean);
+    let files = [];
+    let label = '本地音乐';
+    if (entries.length) {
+      const walk = async (entry, prefix) => {
+        if (entry.isFile) {
+          const f = await new Promise((resolve, reject) => entry.file(resolve, reject));
+          f.relPath = prefix + f.name;
+          files.push(f);
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          for (;;) {
+            const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+            if (!batch.length) break;
+            for (const e of batch) await walk(e, prefix + entry.name + '/');
+          }
+        }
+      };
+      for (const e of entries) await walk(e, '');
+      const dirs = entries.filter((e) => e.isDirectory);
+      if (dirs.length === 1) label = dirs[0].name;
+    } else {
+      files = [...ev.dataTransfer.files];
+    }
+    if (importPanel.hidden) setImportOpen(true);
+    importFiles(files, label);
+  });
+
+  // Bring back the songs saved last time
+  if (window.indexedDB) {
+    loadLibrary().then(async (data) => {
+      if (!data || imported) return;
+      showOnSea(data);
+      if (!importPanel.hidden) renderImport();
+    }).catch(() => {});
+  }
+
+  const importBtn = document.getElementById('importBtn');
+  const importPanel = document.getElementById('importPanel');
+  function setImportOpen(open) {
+    importPanel.hidden = !open;
+    if (open) renderImport();
+    importBtn.setAttribute('aria-expanded', String(open));
+    if (open) document.getElementById('importClose').focus();
+    else if (importPanel.contains(document.activeElement)) document.getElementById('moreDot').focus();   // 歌单导入 itself sits folded away in the menu
+  }
+  importBtn.addEventListener('click', () => { if (importPanel.hidden) setMoreOpen(false); setImportOpen(importPanel.hidden); });
+  document.getElementById('importClose').addEventListener('click', () => setImportOpen(false));
+  addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !importPanel.hidden) { ev.stopImmediatePropagation(); setImportOpen(false); }
+  }, true);
+})();
+</script>
